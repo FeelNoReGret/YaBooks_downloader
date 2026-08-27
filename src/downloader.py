@@ -155,6 +155,29 @@ class YandexBooksDownloader:
 
         return authors
 
+    def extract_narrators(self, data: dict) -> List[str]:
+        """Извлечение чтецов (narrators) из данных API"""
+        narrators = []
+        for narrator_obj in data.get("narrators_objects", []):
+            if isinstance(narrator_obj, dict):
+                name = narrator_obj.get("name") or narrator_obj.get("title", "")
+                if name and name not in narrators:
+                    narrators.append(name)
+
+        narrators_field = data.get("narrators", [])
+        if isinstance(narrators_field, str) and narrators_field:
+            for narrator in narrators_field.split(","):
+                narrator = narrator.strip()
+                if narrator and narrator not in narrators:
+                    narrators.append(narrator)
+        elif isinstance(narrators_field, list):
+            for narrator in narrators_field:
+                name = narrator.get("name") if isinstance(narrator, dict) else narrator
+                if name and name not in narrators:
+                    narrators.append(name)
+
+        return narrators
+
     async def get_resource_info(self, uuid: str, content_type: str) -> Tuple[dict, dict]:
         """Получение полной информации о ресурсе"""
         urls = {
@@ -177,18 +200,20 @@ class YandexBooksDownloader:
         uuid = book_data.get("uuid", "")
         title = book_data.get("title", "Неизвестно")
         authors = self.extract_authors(data) or self.extract_authors(book_data)
+        narrators = self.extract_narrators(data) or self.extract_narrators(book_data)
         annotation = book_data.get("annotation", "")
 
-        # Жанры
+        # Жанры (служебные метки формата, а не жанры, — исключаем)
+        EXCLUDED_TOPICS = {"Виртуальный рассказчик", "Аудио"}
         topics = book_data.get("topics", [])
         genres = []
         if isinstance(topics, list):
             for topic in topics:
                 if isinstance(topic, dict):
                     name = topic.get("title") or topic.get("name") or ""
-                    if name and name != "Виртуальный рассказчик":
+                    if name and name not in EXCLUDED_TOPICS:
                         genres.append(name)
-                elif isinstance(topic, str) and topic != "Виртуальный рассказчик":
+                elif isinstance(topic, str) and topic not in EXCLUDED_TOPICS:
                     genres.append(topic)
 
         # Издатели
@@ -225,6 +250,9 @@ class YandexBooksDownloader:
         # Остальные поля
         original_year = book_data.get("original_year")
         owner_catalog_title = book_data.get("owner_catalog_title")
+        language = book_data.get("language")
+        age_restriction = book_data.get("age_restriction")
+        publication_date = book_data.get("publication_date")
 
         # Источник
         type_url_map = {"book": "books", "audiobook": "audiobooks", "comicbook": "comicbooks"}
@@ -234,6 +262,7 @@ class YandexBooksDownloader:
         metadata = {
             "title": title,
             "authors": authors,
+            "narrators": narrators,
             "annotation": annotation,
             "genres": genres,
             "publishers": publishers,
@@ -244,6 +273,9 @@ class YandexBooksDownloader:
             "source": source,
             "original_year": original_year,
             "owner_catalog_title": owner_catalog_title,
+            "language": language,
+            "age_restriction": age_restriction,
+            "publication_date": publication_date,
         }
 
         return metadata

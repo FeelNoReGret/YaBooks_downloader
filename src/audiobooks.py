@@ -153,6 +153,11 @@ class AudiobooksDownloader:
         temp_dir.mkdir(parents=True, exist_ok=True)
         
         audio_files = []
+        # Храним только те главы, файлы которых реально скачались — это
+        # важно для корректной разметки (см. merge_chapters): если список
+        # глав не совпадает 1:1 со списком аудиофайлов, смещения (offset)
+        # начинают "съезжать" относительно фактического содержимого M4B.
+        successful_chapters = []
         console.print(f"   [cyan]Скачивание глав ({len(chapters_info)} шт.)...[/cyan]")
         for idx, chapter in enumerate(chapters_info):
             chapter_num = chapter["number"]
@@ -161,6 +166,7 @@ class AudiobooksDownloader:
                 await self.downloader.download_file_sequential(chapter["url"], chapter_file)
                 if chapter_file.exists() and chapter_file.stat().st_size > 0:
                     audio_files.append(chapter_file)
+                    successful_chapters.append(chapter)
             except Exception as e:
                 console.print(f"\n   [yellow]Ошибка скачивания {chapter['title']}:[/yellow] {e}")
         
@@ -170,7 +176,7 @@ class AudiobooksDownloader:
             return
         
         console.print("   [cyan]Объединение глав в M4B...[/cyan]")
-        success = await self.merge_chapters(audio_files, chapters_info, m4b_path, cover_data, metadata)
+        success = await self.merge_chapters(audio_files, successful_chapters, m4b_path, cover_data, metadata)
         
         shutil.rmtree(temp_dir, ignore_errors=True)
         
@@ -180,6 +186,34 @@ class AudiobooksDownloader:
         else:
             console.print("\n   [red]Не удалось создать M4B файл[/red]")
 
+    @staticmethod
+    def _chapter_number_from_filename(path: Path) -> int:
+        """Извлекает номер главы из имени временного файла"""
+        match = re.search(r'Глава_(\d+)\.m4a', path.name)
+        return int(match.group(1)) if match else 0
+
+    @staticmethod
+    async def _get_audio_duration(path: Path) -> float:
+        """Точная длительность аудиофайла (в секундах) через ffprobe.
+
+        Используется вместо длительности из ответа API, чтобы разметка
+        глав всегда соответствовала фактическому содержимому файла
+        (без накопления ошибки округления/расхождений с API).
+        """
+        cmd = [
+            'ffprobe', '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(path),
+        ]
+        try:
+            process = await asyncio.create_subprocess_exec(
+                *cmd, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+            stdout, _ = await process.communicate()
+            return float(stdout.decode().strip())
+        except Exception:
+            return 0.0
+
     async def merge_chapters(
         self, 
         audio_files: List[Path], 
@@ -188,7 +222,12 @@ class AudiobooksDownloader:
         cover_data: Optional[bytes], 
         metadata: dict
     ) -> bool:
-        """Объединение глав в M4B с метаданными"""
+        """Объединение глав в M4B с метаданными.
+
+        `chapters_info` должен содержать только те главы, файлы которых
+        реально скачаны (см. вызов из `download()`), в противном случае
+        разметка глав разойдётся с фактическим содержимым файла.
+        """
         temp_dir = output_path.parent / "merge_temp"
         temp_dir.mkdir(parents=True, exist_ok=True)
         
@@ -202,7 +241,16 @@ class AudiobooksDownloader:
                 async with aiofiles.open(cover_path, "wb") as f:
                     await f.write(cover_data)
             
-            audio_files.sort(key=lambda x: int(re.search(r'Глава_(\d+)\.m4a', x.name).group(1)) if re.search(r'Глава_(\d+)\.m4a', x.name) else 0)
+            audio_files = sorted(audio_files, key=self._chapter_number_from_filename)
+
+            # Сопоставляем скачанные файлы с их главами по номеру (а не по
+            # позиции в списке) — так разметка не собьётся, если какая-то
+            # глава не была скачана и выпала из списка.
+            chapters_by_number = {c.get("number"): c for c in chapters_info}
+            ordered_chapters = [
+                chapters_by_number.get(self._chapter_number_from_filename(f), {})
+                for f in audio_files
+            ]
             
             async with aiofiles.open(filelist_path, 'w', encoding='utf-8') as f:
                 for chapter_file in audio_files:
@@ -215,26 +263,35 @@ class AudiobooksDownloader:
                 if metadata:
                     if metadata.get("title"):
                         await f.write(f"title={self._escape(metadata['title'])}\n")
-                    
-                    if metadata.get("authors"):
-                        await f.write(f"artist={self._escape(metadata['authors'][0])}\n")
-                        if len(metadata["authors"]) > 1:
-                            await f.write(f"album_artist={self._escape(', '.join(metadata['authors']))}\n")
+
+                    # Автор(ы) -> Artist, с дублированием в Author
+                    authors = metadata.get("authors") or []
+                    if authors:
+                        authors_str = ", ".join(authors)
+                        await f.write(f"artist={self._escape(authors_str)}\n")
+                        await f.write(f"author={self._escape(authors_str)}\n")
+
+                    # Чтец(ы) -> Composer, с дублированием в Album Artist
+                    narrators = metadata.get("narrators") or []
+                    if narrators:
+                        narrators_str = ", ".join(narrators)
+                        await f.write(f"composer={self._escape(narrators_str)}\n")
+                        await f.write(f"album_artist={self._escape(narrators_str)}\n")
                     
                     if metadata.get("annotation"):
                         desc = metadata["annotation"].replace("\n", " ").replace("\r", " ")[:500]
                         await f.write(f"description={self._escape(desc)}\n")
                     
+                    # Жанры (topics) -> Genre; служебные метки формата
+                    # ("Виртуальный рассказчик", "Аудио") уже отфильтрованы
+                    # в extract_metadata()
                     if metadata.get("genres"):
-                        genres = [g for g in metadata["genres"] if g != "Виртуальный рассказчик"]
-                        if genres:
-                            await f.write(f"genre={self._escape(', '.join(genres))}\n")
+                        await f.write(f"genre={self._escape(', '.join(metadata['genres']))}\n")
                     
                     if metadata.get("language"):
                         await f.write(f"language={metadata['language']}\n")
                     
-                    pub_date = metadata.get("publication_date")
-                    year = pub_date.split("-")[0] if pub_date and "-" in pub_date else (pub_date or str(datetime.now().year))
+                    year = self._extract_year(metadata.get("publication_date"))
                     await f.write(f"date={year}\n")
                     
                     if metadata.get("owner_catalog_title"):
@@ -260,18 +317,30 @@ class AudiobooksDownloader:
                                     await f.write(f"track={track_num}\n")
                             except:
                                 pass
-                
-                for i, chapter in enumerate(chapters_info):
-                    chapter_num = i + 1
-                    chapter_title = chapter.get("title", f"Глава {chapter_num}")
-                    start_time = chapter.get("offset", 0)
-                    duration = chapter.get("duration", 0)
-                    
+
+                # Разметка глав: смещение считаем по фактической длительности
+                # уже скачанных файлов (ffprobe), а не по данным из API —
+                # это гарантирует правильный офсет от начала аудиокниги,
+                # даже если какие-то главы не скачались или их
+                # длительность в API отличается от реальной.
+                cumulative_offset = 0.0
+                for chapter_file, chapter in zip(audio_files, ordered_chapters):
+                    duration = await self._get_audio_duration(chapter_file)
+                    if duration <= 0:
+                        # Фолбэк на данные API, если ffprobe не смог определить длительность
+                        duration = float(chapter.get("duration", 0) or 0)
+
+                    chapter_title = chapter.get("title") or f"Глава {chapter.get('number', '')}"
+                    start_ms = int(round(cumulative_offset * 1000))
+                    end_ms = int(round((cumulative_offset + duration) * 1000))
+
                     await f.write("\n[CHAPTER]\n")
                     await f.write("TIMEBASE=1/1000\n")
-                    await f.write(f"START={int(start_time * 1000)}\n")
-                    await f.write(f"END={int((start_time + duration) * 1000)}\n")
-                    await f.write(f"title={chapter_title}\n")
+                    await f.write(f"START={start_ms}\n")
+                    await f.write(f"END={end_ms}\n")
+                    await f.write(f"title={self._escape(chapter_title)}\n")
+
+                    cumulative_offset += duration
             
             cmd = ['ffmpeg', '-y', '-f', 'concat', '-safe', '0',
                    '-i', str(filelist_path), '-i', str(chapters_metadata_path)]
@@ -282,41 +351,15 @@ class AudiobooksDownloader:
             else:
                 cmd.extend(['-c', 'copy', '-map_metadata', '1'])
             
-            if metadata:
-                if metadata.get("title"):
-                    cmd.extend(['-metadata', f'title={metadata["title"]}'])
-                if metadata.get("authors"):
-                    cmd.extend(['-metadata', f'artist={metadata["authors"][0]}'])
-                if metadata.get("narrators"):
-                    cmd.extend(['-metadata', f'album_artist={", ".join(metadata["narrators"])}'])
-                if metadata.get("annotation"):
-                    cmd.extend(['-metadata', f'description={metadata["annotation"][:500]}'])
-                if metadata.get("language"):
-                    cmd.extend(['-metadata', f'language={metadata["language"]}'])
-                
-                pub_date = metadata.get("publication_date")
-                year = pub_date.split("-")[0] if pub_date and "-" in pub_date else (pub_date or str(datetime.now().year))
-                cmd.extend(['-metadata', f'date={year}'])
-                
-                if metadata.get("owner_catalog_title"):
-                    cmd.extend(['-metadata', f'copyright={metadata["owner_catalog_title"]}'])
-                if metadata.get("publishers"):
-                    cmd.extend(['-metadata', f'publisher={metadata["publishers"][0]}'])
-                if metadata.get("source"):
-                    cmd.extend(['-metadata', f'URL={metadata["source"]}'])
-                
-                if metadata.get("series_list"):
-                    series = metadata["series_list"][0]
-                    if series.get("position_label"):
-                        try:
-                            track_num = int(float(series["position_label"]))
-                            total = series.get("total_parts", 0)
-                            if total > 0:
-                                cmd.extend(['-metadata', f'track={track_num}/{total}'])
-                            else:
-                                cmd.extend(['-metadata', f'track={track_num}'])
-                        except:
-                            pass
+            # Все теги (включая artist/author/composer/album_artist/genre и
+            # главы) уже записаны в chapters_metadata_path и применяются
+            # через -map_metadata 1 выше. Раньше здесь повторно
+            # прописывались -metadata artist/album_artist и т.п. только по
+            # первому автору/пустым чтецам — это перезаписывало (портило)
+            # корректные значения из файла метаданных. Оставляем только
+            # URL источника, который нигде больше не пишется.
+            if metadata and metadata.get("source"):
+                cmd.extend(['-metadata', f'URL={metadata["source"]}'])
             
             cmd.append(str(temp_output))
             
@@ -347,6 +390,27 @@ class AudiobooksDownloader:
                     shutil.rmtree(temp_dir, ignore_errors=True)
                 except:
                     pass
+
+    @staticmethod
+    def _extract_year(pub_date) -> str:
+        """Извлекает год публикации из publication_date.
+
+        API может отдавать это поле по-разному: строкой ("2015-06-01"),
+        числом-таймстампом (секунды или миллисекунды) или null — код
+        должен корректно отработать в любом из случаев и не падать.
+        """
+        if pub_date:
+            if isinstance(pub_date, str):
+                candidate = pub_date.split("-")[0].strip()
+                if candidate.isdigit():
+                    return candidate
+            elif isinstance(pub_date, (int, float)):
+                try:
+                    ts = pub_date / 1000 if pub_date > 1e12 else pub_date
+                    return str(datetime.utcfromtimestamp(ts).year)
+                except (ValueError, OSError, OverflowError):
+                    pass
+        return str(datetime.now().year)
 
     @staticmethod
     def _escape(value: str) -> str:
