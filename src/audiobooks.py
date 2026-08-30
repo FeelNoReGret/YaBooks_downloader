@@ -2,20 +2,16 @@
 import asyncio
 import re
 import shutil
-import subprocess
 from datetime import datetime
-from io import BytesIO
 from pathlib import Path
-from typing import Optional, List
+from typing import Optional, List, Tuple
 
 import aiofiles
-from mutagen.mp4 import MP4, MP4Cover
-from PIL import Image
 from rich.console import Console
 
 from src.config import URLS
 from src.downloader import YandexBooksDownloader
-from src.utils import SystemExitException
+from src.utils import SystemExitException, format_series_position
 
 console = Console()
 
@@ -40,10 +36,10 @@ class AudiobooksDownloader:
             return "max_bit_rate"
         except SystemExitException:
             raise
-        except:
+        except Exception:
             return "max_bit_rate"
 
-    async def download(self, resource: dict, metadata: Optional[dict] = None, verbose: bool = False):
+    async def download(self, resource: dict, metadata: Optional[dict] = None, verbose: bool = False) -> bool:
         uuid = resource["uuid"]
         if not metadata:
             info, metadata = await self.downloader.get_resource_info(uuid, "audiobook")
@@ -53,7 +49,7 @@ class AudiobooksDownloader:
                     console.print(f"[red]Пропуск (недоступна):[/red] {title}")
                 else:
                     console.print(f"[red]   ✗   (недоступна)[/red]")
-                return
+                return False
         
         if metadata.get("series_list"):
             series_uuid = metadata["series_list"][0].get("uuid")
@@ -67,7 +63,7 @@ class AudiobooksDownloader:
                                 if book.get("uuid") == uuid:
                                     series["position_label"] = str(i)
                                     break
-                except:
+                except Exception:
                     pass
         
         playlist_url = URLS["audiobook_playlist"].format(uuid=uuid)
@@ -75,12 +71,12 @@ class AudiobooksDownloader:
             playlist_data = await self.downloader.api_get(playlist_url)
         except Exception as e:
             console.print(f"\n[red]Ошибка получения плейлиста:[/red] {e}")
-            return
+            return False
         
         tracks = playlist_data.get("tracks", [])
         if not tracks:
             console.print("\n[red]Треки не найдены[/red]")
-            return
+            return False
         
         tracks.sort(key=lambda x: x.get("number", 0))
         
@@ -111,7 +107,7 @@ class AudiobooksDownloader:
         
         if not chapters_info:
             console.print("\n[red]Не найдены ссылки для скачивания аудио[/red]")
-            return
+            return False
         
         title = resource.get("title", "Неизвестное название")
         authors = resource.get("authors", [])
@@ -124,14 +120,7 @@ class AudiobooksDownloader:
             first_series = metadata["series_list"][0]
             series_name = first_series.get("title")
             position = first_series.get("position_label", "1")
-            try:
-                pos_num = int(float(position))
-                if pos_num >= 100:
-                    series_position = f"{pos_num:03d}"
-                else:
-                    series_position = f"{pos_num:02d}"
-            except:
-                series_position = str(position)
+            series_position = format_series_position(position)
         
         path = self.downloader.build_book_path(author, title, series_name, series_position)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,34 +135,19 @@ class AudiobooksDownloader:
         if cover_url:
             try:
                 cover_data = await self.downloader.download_file_content(cover_url)
-            except:
+            except Exception:
                 pass
         
         temp_dir = path.parent / f"temp_{uuid}"
         temp_dir.mkdir(parents=True, exist_ok=True)
         
-        audio_files = []
-        # Храним только те главы, файлы которых реально скачались — это
-        # важно для корректной разметки (см. merge_chapters): если список
-        # глав не совпадает 1:1 со списком аудиофайлов, смещения (offset)
-        # начинают "съезжать" относительно фактического содержимого M4B.
-        successful_chapters = []
         console.print(f"   [cyan]Скачивание глав ({len(chapters_info)} шт.)...[/cyan]")
-        for idx, chapter in enumerate(chapters_info):
-            chapter_num = chapter["number"]
-            chapter_file = temp_dir / f"Глава_{chapter_num:02d}.m4a"
-            try:
-                await self.downloader.download_file_sequential(chapter["url"], chapter_file)
-                if chapter_file.exists() and chapter_file.stat().st_size > 0:
-                    audio_files.append(chapter_file)
-                    successful_chapters.append(chapter)
-            except Exception as e:
-                console.print(f"\n   [yellow]Ошибка скачивания {chapter['title']}:[/yellow] {e}")
+        audio_files, successful_chapters = await self._download_chapters(chapters_info, temp_dir)
         
         if not audio_files:
             console.print("\n   [red]Не удалось скачать ни одной главы[/red]")
             shutil.rmtree(temp_dir, ignore_errors=True)
-            return
+            return False
         
         console.print("   [cyan]Объединение глав в M4B...[/cyan]")
         success = await self.merge_chapters(audio_files, successful_chapters, m4b_path, cover_data, metadata)
@@ -183,8 +157,47 @@ class AudiobooksDownloader:
         if success and m4b_path.exists():
             file_size = m4b_path.stat().st_size
             console.print(f"[green]Аудиокнига загружена   ✓   ({file_size / 1024 / 1024:.1f} МБ)[/green]")
+            return True
         else:
             console.print("\n   [red]Не удалось создать M4B файл[/red]")
+            return False
+
+    async def _download_chapters(self, chapters_info: List[dict], temp_dir: Path) -> Tuple[List[Path], List[dict]]:
+        """Параллельно скачивает главы (не более MAX_CONCURRENT_DOWNLOADS
+        одновременно, см. self.downloader.download_semaphore).
+
+        Возвращает списки только успешно скачанных файлов и
+        соответствующих им глав — списки синхронны по индексам, порядок
+        может не совпадать с порядком в chapters_info (т.к. загрузки
+        завершаются в произвольном порядке), но это не важно: дальше
+        файлы/главы всегда сопоставляются по номеру главы, а не по
+        позиции в списке (см. merge_chapters).
+        """
+        total = len(chapters_info)
+        done_count = 0
+
+        async def _download_one(chapter: dict):
+            nonlocal done_count
+            async with self.downloader.download_semaphore:
+                chapter_num = chapter["number"]
+                chapter_file = temp_dir / f"Глава_{chapter_num:02d}.m4a"
+                result = None
+                try:
+                    await self.downloader.download_file_sequential(chapter["url"], chapter_file)
+                    if chapter_file.exists() and chapter_file.stat().st_size > 0:
+                        result = (chapter_file, chapter)
+                except Exception as e:
+                    console.print(f"\n   [yellow]Ошибка скачивания {chapter['title']}:[/yellow] {e}")
+                done_count += 1
+                console.print(f"   [dim]Скачано глав: {done_count}/{total}[/dim]", end='\r')
+                return result
+
+        results = await asyncio.gather(*[_download_one(c) for c in chapters_info])
+        console.print(" " * 40, end='\r')  # затираем строку прогресса
+
+        audio_files = [r[0] for r in results if r]
+        successful_chapters = [r[1] for r in results if r]
+        return audio_files, successful_chapters
 
     @staticmethod
     def _chapter_number_from_filename(path: Path) -> int:
@@ -315,7 +328,7 @@ class AudiobooksDownloader:
                                     await f.write(f"track={track_num}/{total}\n")
                                 else:
                                     await f.write(f"track={track_num}\n")
-                            except:
+                            except (ValueError, TypeError):
                                 pass
 
                 # Разметка глав: смещение считаем по фактической длительности
@@ -323,9 +336,12 @@ class AudiobooksDownloader:
                 # это гарантирует правильный офсет от начала аудиокниги,
                 # даже если какие-то главы не скачались или их
                 # длительность в API отличается от реальной.
+                # Все ffprobe-вызовы выполняются параллельно, а не по
+                # очереди — на десятках глав это заметно быстрее.
+                durations = await asyncio.gather(*[self._get_audio_duration(f) for f in audio_files])
+
                 cumulative_offset = 0.0
-                for chapter_file, chapter in zip(audio_files, ordered_chapters):
-                    duration = await self._get_audio_duration(chapter_file)
+                for chapter_file, chapter, duration in zip(audio_files, ordered_chapters, durations):
                     if duration <= 0:
                         # Фолбэк на данные API, если ffprobe не смог определить длительность
                         duration = float(chapter.get("duration", 0) or 0)
@@ -353,11 +369,8 @@ class AudiobooksDownloader:
             
             # Все теги (включая artist/author/composer/album_artist/genre и
             # главы) уже записаны в chapters_metadata_path и применяются
-            # через -map_metadata 1 выше. Раньше здесь повторно
-            # прописывались -metadata artist/album_artist и т.п. только по
-            # первому автору/пустым чтецам — это перезаписывало (портило)
-            # корректные значения из файла метаданных. Оставляем только
-            # URL источника, который нигде больше не пишется.
+            # через -map_metadata 1 выше. Оставляем только URL источника,
+            # который нигде больше не пишется.
             if metadata and metadata.get("source"):
                 cmd.extend(['-metadata', f'URL={metadata["source"]}'])
             
@@ -383,12 +396,12 @@ class AudiobooksDownloader:
                 if temp_file.exists():
                     try:
                         temp_file.unlink()
-                    except:
+                    except Exception:
                         pass
             if temp_dir.exists():
                 try:
                     shutil.rmtree(temp_dir, ignore_errors=True)
-                except:
+                except Exception:
                     pass
 
     @staticmethod

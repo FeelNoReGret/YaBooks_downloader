@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Загрузчик книг с Яндекс.Книги"""
 import asyncio
+import os
+import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Optional, List, Dict, Any, Tuple
+from typing import Optional, List, Tuple
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -12,7 +14,7 @@ from rich.console import Console
 from rich.prompt import Prompt
 from rich.table import Table
 
-from src.config import URLS, HEADERS, TITLE_MAX_LENGTH
+from src.config import URLS, HEADERS, TITLE_MAX_LENGTH, MYBOOKS_DIR, DOWNLOAD_RETRY_ATTEMPTS, DOWNLOAD_RETRY_DELAY
 from src.auth import get_auth_token
 from src.downloader import YandexBooksDownloader
 from src.books import BooksDownloader
@@ -21,6 +23,14 @@ from src.comics import ComicsDownloader
 from src.utils import SystemExitException
 
 console = Console()
+
+# Общие словари названий типов контента — раньше дублировались в нескольких
+# методах YaBooksApp с одинаковым содержимым.
+TYPE_NAMES_ICON = {"book": "📚 EPUB", "audiobook": "🎧 Аудиокниги", "comicbook": "🎨 Комиксы"}
+CONTENT_TYPE_LABELS = {"book": "Книга", "audiobook": "Аудиокнига", "comicbook": "Комикс"}
+CONTENT_TYPE_PLURAL = {"book": "книг", "audiobook": "аудиокниг", "comicbook": "комиксов"}
+DOWNLOAD_TYPE_NAMES = {"audiobook": "аудиокниги", "book": "книги", "comicbook": "комикса"}
+RESOURCE_TYPE_NAMES_RU = {"book": "книга", "audiobook": "аудиокнига", "comicbook": "комикс", "series": "серия", "authors": "автор"}
 
 
 def pad_title(title: str) -> str:
@@ -36,6 +46,7 @@ def pad_number(num: int, total: int) -> str:
 
 class YaBooksApp:
     def __init__(self):
+        MYBOOKS_DIR.mkdir(parents=True, exist_ok=True)
         self.downloader = YandexBooksDownloader()
         self.books = BooksDownloader(self.downloader)
         self.audiobooks = AudiobooksDownloader(self.downloader)
@@ -44,14 +55,90 @@ class YaBooksApp:
         self.ffmpeg_available = self._check_ffmpeg_sync()
 
     @staticmethod
-    def _check_ffmpeg_sync() -> bool:
+    def _candidate_ffmpeg_dirs() -> List[Path]:
+        """Типовые папки, куда разные пакетные менеджеры Windows кладут
+        ffmpeg/ffprobe, если PATH ещё не обновился в текущей сессии
+        терминала (после winget install PATH применяется только к новым
+        процессам, а не к уже открытому окну PowerShell)."""
+        if sys.platform != "win32":
+            return []
+
+        dirs: List[Path] = []
+        local_appdata = os.environ.get("LOCALAPPDATA")
+        program_data = os.environ.get("PROGRAMDATA")
+        user_profile = os.environ.get("USERPROFILE")
+
+        # winget сам кладёт алиасы ffmpeg.exe/ffprobe.exe сюда
+        if local_appdata:
+            dirs.append(Path(local_appdata) / "Microsoft" / "WinGet" / "Links")
+            # Реальные бинарники пакета Gyan.FFmpeg (архив распаковывается
+            # в подпапку вида ffmpeg-X.Y-full_build/bin)
+            packages_dir = Path(local_appdata) / "Microsoft" / "WinGet" / "Packages"
+            if packages_dir.exists():
+                for pkg_dir in packages_dir.glob("Gyan.FFmpeg*"):
+                    dirs.extend(pkg_dir.glob("*/bin"))
+                    dirs.extend(pkg_dir.glob("bin"))
+
+        # Chocolatey
+        if program_data:
+            dirs.append(Path(program_data) / "chocolatey" / "bin")
+
+        # Scoop
+        if user_profile:
+            dirs.append(Path(user_profile) / "scoop" / "shims")
+
+        return [d for d in dirs if d.exists()]
+
+    @classmethod
+    def _check_ffmpeg_sync(cls) -> bool:
         def _exists(cmd):
             try:
                 subprocess.run([cmd, '-version'], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True)
                 return True
             except (FileNotFoundError, subprocess.CalledProcessError):
                 return False
-        return _exists('ffmpeg') and _exists('ffprobe')
+
+        if _exists('ffmpeg') and _exists('ffprobe'):
+            return True
+
+        # FFmpeg мог быть установлен только что (например, через
+        # winget install ffmpeg) в текущей сессии терминала — PATH
+        # процесса ещё не обновился. Ищем в типовых папках установки и,
+        # если находим обе утилиты, добавляем папку в PATH этого процесса,
+        # чтобы дальнейшие вызовы ffmpeg/ffprobe (в том числе из
+        # audiobooks.py) находили их без перезапуска терминала.
+        for directory in cls._candidate_ffmpeg_dirs():
+            has_ffmpeg = (directory / "ffmpeg.exe").exists()
+            has_ffprobe = (directory / "ffprobe.exe").exists()
+            if has_ffmpeg and has_ffprobe:
+                os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
+                if _exists('ffmpeg') and _exists('ffprobe'):
+                    return True
+
+        return False
+
+    @staticmethod
+    def _print_no_ffmpeg():
+        console.print("\n[red]FFmpeg не найден.[/red]")
+        console.print("[yellow]Для загрузки аудиокниг необходимо установить FFmpeg.[/yellow]")
+        console.print("[yellow]Скачать можно с официального сайта:[/yellow] [link]https://www.ffmpeg.org/download.html[/link]")
+        console.print("[yellow]Для Windows 10/11 удобно его установить командой в PowerShell: winget install ffmpeg[/yellow]")
+        console.print("[yellow]Установите FFmpeg и повторите запуск скрипта.[/yellow]")
+
+    async def ensure_audio_ready(self) -> bool:
+        """Проверяет наличие FFmpeg и (один раз за сеанс) спрашивает
+        качество аудио. Возвращает False, если загрузку аудиокниг
+        продолжать нельзя (нет FFmpeg или пользователь вышел из выбора)."""
+        if not self.ffmpeg_available:
+            self._print_no_ffmpeg()
+            return False
+        if not self.bitrate_set:
+            try:
+                self.downloader.bitrate_mode = self.audiobooks.ask_bitrate()
+                self.bitrate_set = True
+            except SystemExitException:
+                return False
+        return True
 
     async def initialize(self):
         token = get_auth_token()
@@ -61,7 +148,6 @@ class YaBooksApp:
         await self.downloader.close()
 
     def parse_input_url(self, url: str) -> Tuple[Optional[str], Optional[str]]:
-        import re
         url = url.strip()
         if '?' in url:
             url = url.split('?')[0]
@@ -95,25 +181,13 @@ class YaBooksApp:
                     return "series"
                 elif info.get(rtype):
                     return rtype
-            except:
+            except Exception:
                 continue
         return None
 
     async def process_single_resource(self, uuid: str, content_type: str):
-        if content_type == "audiobook":
-            if not self.ffmpeg_available:
-                console.print("\n[red]FFmpeg не найден.[/red]")
-                console.print("[yellow]Для загрузки аудиокниг необходимо установить FFmpeg.[/yellow]")
-                console.print("[yellow]Скачать можно с официального сайта:[/yellow] [link]https://www.ffmpeg.org/download.html[/link]")
-                console.print("[yellow]Для Windows 10/11 удобно его установить командой в PowerShell: winget install ffmpeg[/yellow]")
-                console.print("[yellow]Установите FFmpeg и повторите запуск скрипта.[/yellow]")
-                return
-            if not self.bitrate_set:
-                try:
-                    self.downloader.bitrate_mode = self.audiobooks.ask_bitrate()
-                    self.bitrate_set = True
-                except SystemExitException:
-                    return
+        if content_type == "audiobook" and not await self.ensure_audio_ready():
+            return
 
         info, metadata = await self.downloader.get_resource_info(uuid, content_type)
         if not self.downloader.check_availability(info, content_type):
@@ -136,15 +210,67 @@ class YaBooksApp:
             if s.get("title"):
                 series_info = f" (серия \"{s.get('title', '')}\")"
 
-        type_names = {"audiobook": "аудиокниги", "book": "книги", "comicbook": "комикса"}
-        console.print(f"\n[cyan]Загрузка {type_names.get(content_type, content_type)}: {title}{series_info}[/cyan]")
+        console.print(f"\n[cyan]Загрузка {DOWNLOAD_TYPE_NAMES.get(content_type, content_type)}: {title}{series_info}[/cyan]")
 
-        if content_type == "comicbook":
-            await self.comics.download(resource, verbose=True)
-        elif content_type == "audiobook":
-            await self.audiobooks.download(resource, metadata, verbose=True)
+        last_exception: Optional[Exception] = None
+        for attempt in range(1, DOWNLOAD_RETRY_ATTEMPTS + 1):
+            last_exception = None
+            try:
+                if content_type == "comicbook":
+                    ok = await self.comics.download(resource, verbose=True)
+                elif content_type == "audiobook":
+                    ok = await self.audiobooks.download(resource, metadata, verbose=True)
+                else:
+                    ok = await self.books.download(resource, metadata, verbose=True)
+                if ok:
+                    return
+            except Exception as e:
+                last_exception = e
+
+            if attempt < DOWNLOAD_RETRY_ATTEMPTS:
+                console.print(
+                    f"[yellow]Повтор попытки {attempt + 1}/{DOWNLOAD_RETRY_ATTEMPTS}...[/yellow]"
+                )
+                await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
+
+        if last_exception:
+            console.print(f"[red]Ошибка: {last_exception}[/red]")
+
+    async def _download_batch(self, items: List[dict], content_type: str, plural: str) -> Tuple[int, List[str]]:
+        """Скачивает список ресурсов одного типа с прогрессом.
+        Возвращает (число успешных, список названий с ошибкой)."""
+        label = CONTENT_TYPE_LABELS.get(content_type, "Книга")
+        total = len(items)
+        succeeded = 0
+        failed = []
+
+        console.print(f"\n[cyan]Скачивание {plural} ({total} шт.)...[/cyan]")
+        for i, book in enumerate(items, 1):
+            book_title = book.get('title', 'Неизвестно')
+            console.print(f"[cyan]{label} {pad_number(i, total)}/{total}: {book_title}[/cyan]", end='')
+            if content_type == "audiobook":
+                console.print()
+
+            ok = await self.download_resource(book, content_type)
+
+            if ok:
+                succeeded += 1
+                if content_type != "audiobook":
+                    console.print(" [green]✓[/green]")
+            else:
+                failed.append(book_title)
+                if content_type != "audiobook":
+                    console.print(" [red]✗[/red]")
+        return succeeded, failed
+
+    @staticmethod
+    def _print_batch_summary(succeeded: int, total: int, failed: List[str]):
+        if failed:
+            console.print(f"\n[yellow]Готово: {succeeded}/{total}. Не удалось скачать:[/yellow]")
+            for title in failed:
+                console.print(f"  [red]✗[/red] {title}")
         else:
-            await self.books.download(resource, metadata, verbose=True)
+            console.print("[bold green]✓ Все книги скачаны[/bold green]")
 
     async def process_series(self, series_uuid: str):
         books = await self.downloader.get_series_books(series_uuid)
@@ -162,23 +288,19 @@ class YaBooksApp:
             console.print("[red]Не удалось определить типы книг[/red]")
             return
 
-        type_names = {"book": "📚 EPUB", "audiobook": "🎧 Аудиокниги", "comicbook": "🎨 Комиксы"}
-        content_type_labels = {"book": "Книга", "audiobook": "Аудиокнига", "comicbook": "Комикс"}
-        content_type_plural = {"book": "книг", "audiobook": "аудиокниг", "comicbook": "комиксов"}
-
         console.print("\n[bold]Состав серии:[/bold]")
         for rtype, items in books_by_type.items():
-            console.print(f"  {type_names.get(rtype, rtype)}: {len(items)} шт.")
+            console.print(f"  {TYPE_NAMES_ICON.get(rtype, rtype)}: {len(items)} шт.")
 
         if len(books_by_type) == 1:
             content_type = list(books_by_type.keys())[0]
             filtered = books_by_type[content_type]
-            console.print(f"\n[cyan]В серии только {type_names.get(content_type, content_type)}[/cyan]")
+            console.print(f"\n[cyan]В серии только {TYPE_NAMES_ICON.get(content_type, content_type)}[/cyan]")
         else:
             choices = []
             display_map = {}
             for i, (rtype, items) in enumerate(books_by_type.items(), 1):
-                console.print(f"{i}. {type_names.get(rtype, rtype)} ({len(items)} шт.)")
+                console.print(f"{i}. {TYPE_NAMES_ICON.get(rtype, rtype)} ({len(items)} шт.)")
                 display_map[str(i)] = rtype
                 choices.append(str(i))
             console.print("0. Выход")
@@ -189,23 +311,11 @@ class YaBooksApp:
             content_type = display_map[selected]
             filtered = books_by_type[content_type]
 
-        if content_type == "audiobook":
-            if not self.ffmpeg_available:
-                console.print("\n[red]FFmpeg не найден.[/red]")
-                console.print("[yellow]Для загрузки аудиокниг необходимо установить FFmpeg.[/yellow]")
-                console.print("[yellow]Скачать можно с официального сайта:[/yellow] [link]https://www.ffmpeg.org/download.html[/link]")
-                console.print("[yellow]Для Windows 10/11 удобно его установить командой в PowerShell: winget install ffmpeg[/yellow]")
-                console.print("[yellow]Установите FFmpeg и повторите запуск скрипта.[/yellow]")
-                return
-            if not self.bitrate_set:
-                try:
-                    self.downloader.bitrate_mode = self.audiobooks.ask_bitrate()
-                    self.bitrate_set = True
-                except SystemExitException:
-                    return
+        if content_type == "audiobook" and not await self.ensure_audio_ready():
+            return
 
-        label = content_type_labels.get(content_type, "Книга")
-        plural = content_type_plural.get(content_type, "книг")
+        label = CONTENT_TYPE_LABELS.get(content_type, "Книга")
+        plural = CONTENT_TYPE_PLURAL.get(content_type, "книг")
 
         table = Table(title=f"Книги серии ({len(filtered)} шт.)")
         table.add_column("№", justify="right", style="cyan")
@@ -224,19 +334,8 @@ class YaBooksApp:
             return
 
         if selected == "*":
-            total = len(filtered)
-            console.print(f"\n[cyan]Скачивание всей серии ({total} {plural})...[/cyan]")
-            for i, book in enumerate(filtered, 1):
-                book_title = book.get('title', 'Неизвестно')
-                console.print(f"[cyan]{label} {pad_number(i, total)}/{total}: {book_title}[/cyan]", end='')
-                if content_type == "audiobook":
-                    console.print()
-                await self.download_resource(book, content_type)
-                if content_type != "audiobook":
-                    console.print(" [green]✓[/green]")
-                else:
-                    console.print()
-            console.print("[bold green]✓ Все книги скачаны[/bold green]")
+            succeeded, failed = await self._download_batch(filtered, content_type, plural)
+            self._print_batch_summary(succeeded, len(filtered), failed)
             return
 
         try:
@@ -254,8 +353,6 @@ class YaBooksApp:
             "audiobook": ("🎧 Аудиокниги", URLS["author_audiobooks"].format(uuid=author_uuid)),
             "comicbook": ("🎨 Комиксы", URLS["author_comicbooks"].format(uuid=author_uuid)),
         }
-        content_type_labels = {"book": "Книга", "audiobook": "Аудиокнига", "comicbook": "Комикс"}
-        content_type_plural = {"book": "книг", "audiobook": "аудиокниг", "comicbook": "комиксов"}
 
         books_count = {}
         for rtype, (name, url) in type_config.items():
@@ -264,7 +361,7 @@ class YaBooksApp:
                 items = data.get("books", data.get("audiobooks", data.get("comicbooks", [])))
                 count = len(items)
                 books_count[rtype] = {"count": count, "type_name": name, "items": items}
-            except:
+            except Exception:
                 books_count[rtype] = {"count": 0, "type_name": name, "items": []}
 
         total = sum(v["count"] for v in books_count.values())
@@ -286,23 +383,10 @@ class YaBooksApp:
             return
         content_type, items = display_map[selected]
 
-        if content_type == "audiobook":
-            if not self.ffmpeg_available:
-                console.print("\n[red]FFmpeg не найден.[/red]")
-                console.print("[yellow]Для загрузки аудиокниг необходимо установить FFmpeg.[/yellow]")
-                console.print("[yellow]Скачать можно с официального сайта:[/yellow] [link]https://www.ffmpeg.org/download.html[/link]")
-                console.print("[yellow]Для Windows 10/11 удобно его установить командой в PowerShell: winget install ffmpeg[/yellow]")
-                console.print("[yellow]Установите FFmpeg и повторите запуск скрипта.[/yellow]")
-                return
-            if not self.bitrate_set:
-                try:
-                    self.downloader.bitrate_mode = self.audiobooks.ask_bitrate()
-                    self.bitrate_set = True
-                except SystemExitException:
-                    return
+        if content_type == "audiobook" and not await self.ensure_audio_ready():
+            return
 
-        label = content_type_labels.get(content_type, "Книга")
-        plural = content_type_plural.get(content_type, "книг")
+        plural = CONTENT_TYPE_PLURAL.get(content_type, "книг")
 
         books = []
         for item in items:
@@ -314,32 +398,51 @@ class YaBooksApp:
                 "resource_type": content_type,
             })
 
-        total = len(books)
-        console.print(f"\n[cyan]Скачивание {plural} автора ({total} шт.)...[/cyan]")
-        for i, book in enumerate(books, 1):
-            book_title = book['title']
-            console.print(f"[cyan]{label} {pad_number(i, total)}/{total}: {book_title}[/cyan]", end='')
-            if content_type == "audiobook":
-                console.print()
-            await self.download_resource(book, content_type)
-            if content_type != "audiobook":
-                console.print(" [green]✓[/green]")
-            else:
-                console.print()
-        console.print("[bold green]✓ Все книги скачаны[/bold green]")
+        succeeded, failed = await self._download_batch(books, content_type, plural)
+        self._print_batch_summary(succeeded, len(books), failed)
 
-    async def download_resource(self, resource: dict, content_type: str):
-        try:
-            if content_type == "book":
-                await self.books.download(resource)
-            elif content_type == "audiobook":
-                await self.audiobooks.download(resource)
-            elif content_type == "comicbook":
-                await self.comics.download(resource)
-            else:
-                console.print(f"[yellow]Неизвестный тип: {content_type}[/yellow]")
-        except Exception as e:
-            console.print(f"[red]Ошибка: {e}[/red]")
+    async def _download_once(self, resource: dict, content_type: str) -> bool:
+        """Одна попытка скачивания ресурса без повторов."""
+        if content_type == "book":
+            return await self.books.download(resource)
+        elif content_type == "audiobook":
+            return await self.audiobooks.download(resource)
+        elif content_type == "comicbook":
+            return await self.comics.download(resource)
+        else:
+            console.print(f"[yellow]Неизвестный тип: {content_type}[/yellow]")
+            return False
+
+    async def download_resource(self, resource: dict, content_type: str) -> bool:
+        """Скачивание ресурса с повторными попытками.
+
+        Некоторые книги/аудиокниги/комиксы периодически отдают ошибку
+        "недоступна" при пакетной загрузке, хотя при единичной попытке
+        по прямой ссылке скачиваются нормально. Поэтому при неудаче
+        (как при False, так и при исключении) повторяем попытку до
+        DOWNLOAD_RETRY_ATTEMPTS раз с паузой DOWNLOAD_RETRY_DELAY
+        секунд перед следующей попыткой.
+        """
+        last_exception: Optional[Exception] = None
+        for attempt in range(1, DOWNLOAD_RETRY_ATTEMPTS + 1):
+            last_exception = None
+            try:
+                if await self._download_once(resource, content_type):
+                    return True
+            except Exception as e:
+                last_exception = e
+
+            if attempt < DOWNLOAD_RETRY_ATTEMPTS:
+                title = resource.get("title", "Неизвестно")
+                console.print(
+                    f"[yellow]  Повтор попытки {attempt + 1}/{DOWNLOAD_RETRY_ATTEMPTS} "
+                    f"для \"{title}\"...[/yellow]"
+                )
+                await asyncio.sleep(DOWNLOAD_RETRY_DELAY)
+
+        if last_exception:
+            console.print(f"[red]Ошибка: {last_exception}[/red]")
+        return False
 
     async def run(self, url: Optional[str] = None):
         args = sys.argv[1:]
@@ -390,16 +493,12 @@ class YaBooksApp:
                 console.print("[red]Не удалось определить тип ресурса[/red]")
                 return
 
-        if content_type == "audiobook" and not self.ffmpeg_available:
-            console.print("\n[red]FFmpeg не найден.[/red]")
-            console.print("[yellow]Для загрузки аудиокниг необходимо установить FFmpeg.[/yellow]")
-            console.print("[yellow]Скачать можно с официального сайта:[/yellow] [link]https://www.ffmpeg.org/download.html[/link]")
-            console.print("[yellow]Для Windows 10/11 удобно его установить командой в PowerShell: winget install ffmpeg[/yellow]")
-            console.print("[yellow]Установите FFmpeg и повторите запуск скрипта.[/yellow]")
-            return
+        # Для одиночной аудиокниги проверка FFmpeg/битрейта повторно
+        # выполняется внутри process_single_resource (ensure_audio_ready);
+        # для series/authors тип контента станет известен только после
+        # запроса состава, поэтому там она вызывается на месте.
 
-        type_names_ru = {"book": "книга", "audiobook": "аудиокнига", "comicbook": "комикс", "series": "серия", "authors": "автор"}
-        type_name_ru = type_names_ru.get(content_type, content_type)
+        type_name_ru = RESOURCE_TYPE_NAMES_RU.get(content_type, content_type)
         console.print(f"[cyan]Определён тип: {type_name_ru}[/cyan]")
         if self.bitrate_set:
             name = "максимальное" if self.downloader.bitrate_mode == "max_bit_rate" else "минимальное"

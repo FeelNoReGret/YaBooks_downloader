@@ -9,7 +9,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from rich.console import Console
 
 from src.config import HEADERS, URLS, MYBOOKS_DIR, MAX_CONCURRENT_DOWNLOADS
-from src.utils import sanitize_filename
+from src.utils import sanitize_filename, format_series_position
 
 console = Console()
 
@@ -46,7 +46,11 @@ class YandexBooksDownloader:
             token_file = Path("token.txt")
             if token_file.exists():
                 token_file.unlink()
-            new_token = get_auth_token()
+            # get_auth_token() синхронная и может открыть блокирующее окно
+            # авторизации (pywebview) — выполняем её в отдельном потоке,
+            # чтобы не заморозить event loop (особенно важно при
+            # параллельных загрузках, например глав аудиокниги).
+            new_token = await asyncio.to_thread(get_auth_token)
             if new_token:
                 HEADERS["auth-token"] = new_token
                 self.client.headers["auth-token"] = new_token
@@ -292,10 +296,7 @@ class YandexBooksDownloader:
                 continue
             
             position = part.get("position_label") or part.get("position") or 0
-            try:
-                series_position = f"{int(float(position)):02d}"
-            except:
-                series_position = str(position)
+            series_position = format_series_position(position)
             
             books.append({
                 "uuid": resource.get("uuid", ""),

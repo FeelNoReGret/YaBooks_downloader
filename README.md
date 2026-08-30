@@ -1,33 +1,50 @@
 # Yandex Books downloader
-## Установка зависимостей:
-*pip install -r requirements.txt*
-
-Для загрузки аудиокниг требуется установленный в системе FFmpeg (https://www.ffmpeg.org/download.html)  
+## Инструкция по установке среды запуска скрипта (для Windows):
+1. Предлагаю к использованию UV — сверхбыстрый менеджер Python от компании Astral.  
+Установка из PowerShell: *powershell -c "irm https://astral.sh/uv/install.ps1 | iex"*
+2. Установите стабильную версию Python:  
+*uv python install 3.14*
+3. Сделайте её версией по умолчанию для всех проектов:  
+*uv python pin 3.14*
+4. Перейдите в папку, в которую будет склонирован репозиторий скрипта.
+Склонируйте репозиторий с гитхаба и перейдите в его папку:  
+*git clone https://github.com/Rennats/YaBooks_downloader.git  
+cd YaBooks_downloader*
+5. Создайте виртуальное окружение с помощью UV:  
+*uv venv*
+6. Активируйте окружение в Windows:  
+В PowerShell: *.venv\Scripts\Activate.ps1*  
+В CMD: *.venv\Scripts\activate.bat*
+7. Установите библиотеки из файла зависимостей:  
+*uv pip install -r requirements.txt*
+8. Для загрузки аудиокниг требуется установленный в системе FFmpeg (https://www.ffmpeg.org/download.html)    
 Для Windows 10/11 удобно его установить командой в PowerShell: *winget install ffmpeg*  
 
-## Авторизация в аккаунт Яндекс
-Для доступа к книгам используется токен, для получения которого необходима авторизация  
-![Авторизация](https://github.com/kettle017/RU_Bookmate_downloader/assets/37309120/bb3453eb-5d44-4410-b2e1-05193c88333e)
-
-## Параметры запуска скрипта:
-*python YaBooks_downloader.py [ПАРАМЕТРЫ] [ССЫЛКА]*
-
-__Параметры:__  
+## Запуск скрипта:
+1. Активируйте окружение в Windows:  
+В PowerShell: *.venv\Scripts\Activate.ps1*  
+В CMD: *.venv\Scripts\activate.bat*
+2. Запустите скрипт:   
+*python YaBooks_downloader.py [ПАРАМЕТРЫ] [ССЫЛКА]*  
+__Параметры (необязательные):__  
   *--max_bitrate*&ensp;&ensp;&ensp;Загрузка аудиокниг в максимальном качестве  
   *--min_bitrate*&ensp;&ensp;&ensp;Загрузка аудиокниг в минимальном качестве  
-
 __Ссылка может быть на:__  
   книгу&ensp;&ensp;&ensp;&ensp;&ensp;&ensp;&ensp; - https://books.yandex.ru/books/UUID  
   аудиокнигу&ensp;&ensp;&ensp; - https://books.yandex.ru/audiobooks/UUID  
   комикс&ensp;&ensp;&ensp;&ensp;&ensp;&ensp; - https://books.yandex.ru/comicbooks/UUID  
   серию&ensp;&ensp;&ensp;&ensp;&ensp;&ensp; - https://books.yandex.ru/series/UUID  
   автора&ensp;&ensp;&ensp;&ensp;&ensp;&ensp; - https://books.yandex.ru/authors/UUID  
-
 __Примеры:__  
   *python YaBooks_downloader.py AbCd1234*  
   *python YaBooks_downloader.py --min_bitrate https://books.yandex.ru/audiobooks/AbCd1234*  
   *python YaBooks_downloader.py (интерактивный режим)*  
 
+## Авторизация в ваш аккаунт Яндекс
+Для доступа к книгам используется токен, для получения которого необходима авторизация  
+![Авторизация](https://github.com/kettle017/RU_Bookmate_downloader/assets/37309120/bb3453eb-5d44-4410-b2e1-05193c88333e)
+
 ## Скачанные книги
-Скачанные в процессе работы книги загружаются в подпапку MyBooks папки запуска скрипта.  
-При этом в ней организуются подпапки по имени автора (Фамилия Имя), внутри которой создаются подпапки по сериям, книги без серий расположены в корне папки автора  
+Скачанные в процессе работы книги загружаются в подпапку MyBooks папки запуска скрипта (имя подпапки можно изменить в файле /scr/config.py в переменной MYBOOKS_DIR).  
+При этом загружаемые книги загружаются в подпапки по имени автора (Фамилия Имя), внутри которых создаются подпапки по сериям, книги без серий загружаются в корневую папку автора.
+Аудиокниги загружаются в единый файл с именем аудиокниги и расширением M4B, в которой в метаданных указаны название аудиокниги, автор, чтец, год, а также разметка на главы.

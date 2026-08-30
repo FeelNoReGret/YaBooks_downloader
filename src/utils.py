@@ -26,3 +26,16 @@ def sanitize_filename(name: str) -> str:
         name = name.replace(forbidden, replacement)
     name = re.sub(r'\s+', ' ', name)
     return name.strip()
+
+
+def format_series_position(position) -> str:
+    """Форматирует позицию книги в серии с ведущими нулями.
+
+    Используется во всех загрузчиках (книги/аудиокниги/комиксы) вместо
+    того, чтобы каждый дублировал одну и ту же логику самостоятельно.
+    """
+    try:
+        pos_num = int(float(position))
+    except (ValueError, TypeError):
+        return str(position)
+    return f"{pos_num:03d}" if pos_num >= 100 else f"{pos_num:02d}"

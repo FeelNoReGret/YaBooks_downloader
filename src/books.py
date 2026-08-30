@@ -11,6 +11,7 @@ from rich.console import Console
 
 from src.config import URLS
 from src.downloader import YandexBooksDownloader
+from src.utils import format_series_position
 
 console = Console()
 
@@ -21,7 +22,7 @@ class BooksDownloader:
     def __init__(self, downloader: YandexBooksDownloader):
         self.downloader = downloader
 
-    async def download(self, resource: dict, metadata: Optional[dict] = None, verbose: bool = False):
+    async def download(self, resource: dict, metadata: Optional[dict] = None, verbose: bool = False) -> bool:
         """Скачивание EPUB книги"""
         uuid = resource["uuid"]
         
@@ -33,7 +34,7 @@ class BooksDownloader:
         else:
             try:
                 info, _ = await self.downloader.get_resource_info(uuid, "book")
-            except:
+            except Exception:
                 pass
         
         if info and not self.downloader.check_availability(info, "book"):
@@ -42,7 +43,7 @@ class BooksDownloader:
                 console.print(f"[red]Пропуск (недоступна):[/red] {title}")
             else:
                 console.print(f"[red]   ✗   (недоступна)[/red]")
-            return
+            return False
         
         title = metadata.get("title", "Неизвестное название")
         author = metadata.get("authors", ["Неизвестный автор"])[0] if metadata.get("authors") else "Неизвестный автор"
@@ -54,14 +55,7 @@ class BooksDownloader:
             first_series = metadata["series_list"][0]
             series_name = first_series.get("title")
             position = first_series.get("position_label", "1")
-            try:
-                pos_num = int(float(position))
-                if pos_num >= 100:
-                    series_position = f"{pos_num:03d}"
-                else:
-                    series_position = f"{pos_num:02d}"
-            except:
-                series_position = str(position)
+            series_position = format_series_position(position)
 
         path = self.downloader.build_book_path(author, title, series_name, series_position)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,7 +69,7 @@ class BooksDownloader:
         
         if not temp_path.exists():
             console.print("[red]Ошибка скачивания книги[/red]")
-            return
+            return False
         
         cover_url = metadata.get("cover_url")
         if not cover_url:
@@ -111,6 +105,7 @@ class BooksDownloader:
         
         if verbose:
             console.print(f"[green]Книга загружена!   ✓[/green]")
+        return True
 
     def _remove_missing_images_from_manifest(self, epub_path: Path):
         """Удаляет из content.opf ссылки на отсутствующие в архиве изображения"""
@@ -196,8 +191,7 @@ class BooksDownloader:
                 new_book.add_metadata("DC", "publisher", publisher)
 
             for genre in metadata.get("genres", []):
-                if genre != "Виртуальный рассказчик":
-                    new_book.add_metadata("DC", "subject", genre)
+                new_book.add_metadata("DC", "subject", genre)
 
             for series in metadata.get("series_list", []):
                 if series.get("title"):
@@ -276,7 +270,7 @@ class BooksDownloader:
                 book.set_cover("cover.jpg", cover_data)
                 epub.write_epub(str(epub_path), book)
                 return
-            except:
+            except Exception:
                 pass
             
             self._add_cover_manually(epub_path, cover_data)
@@ -336,7 +330,7 @@ class BooksDownloader:
                                         reference.set('href', 'cover.jpg')
                                         
                                         data = ET.tostring(root, encoding='utf-8', xml_declaration=True)
-                            except:
+                            except Exception:
                                 pass
                         
                         if item.filename == "mimetype":
@@ -348,6 +342,6 @@ class BooksDownloader:
                     zout.writestr(cover_info, cover_data, compress_type=zipfile.ZIP_DEFLATED)
             
             shutil.move(tmp_path, epub_path)
-        except:
+        except Exception:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)

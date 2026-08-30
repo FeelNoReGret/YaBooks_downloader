@@ -4,6 +4,7 @@ from rich.console import Console
 
 from src.config import URLS
 from src.downloader import YandexBooksDownloader
+from src.utils import format_series_position
 
 console = Console()
 
@@ -14,19 +15,19 @@ class ComicsDownloader:
     def __init__(self, downloader: YandexBooksDownloader):
         self.downloader = downloader
 
-    async def download(self, resource: dict, verbose: bool = False):
+    async def download(self, resource: dict, verbose: bool = False) -> bool:
         """Скачивание комикса в формате CBZ"""
         uuid = resource["uuid"]
         
         meta_url = URLS["comicbook_meta"].format(uuid=uuid)
         try:
             meta_data = await self.downloader.api_get(meta_url)
-        except Exception as e:
+        except Exception:
             if verbose:
                 console.print(f"[red]Пропуск (недоступна):[/red] {resource.get('title', 'Неизвестно')}")
             else:
                 console.print(f"[red]   ✗   (недоступна)[/red]")
-            return
+            return False
         
         uris = meta_data.get("uris", {})
         download_url = uris.get("zip")
@@ -35,12 +36,12 @@ class ComicsDownloader:
                 console.print(f"[red]Пропуск (недоступна):[/red] {resource.get('title', 'Неизвестно')}")
             else:
                 console.print(f"[red]   ✗   (недоступна)[/red]")
-            return
+            return False
         
         metadata = None
         try:
             info, metadata = await self.downloader.get_resource_info(uuid, "comicbook")
-        except:
+        except Exception:
             pass
         
         title = resource.get("title", "Неизвестное название")
@@ -54,14 +55,7 @@ class ComicsDownloader:
             first_series = metadata["series_list"][0]
             series_name = first_series.get("title")
             position = first_series.get("position_label", "1")
-            try:
-                pos_num = int(float(position))
-                if pos_num >= 100:
-                    series_position = f"{pos_num:03d}"
-                else:
-                    series_position = f"{pos_num:02d}"
-            except:
-                series_position = str(position)
+            series_position = format_series_position(position)
         
         path = self.downloader.build_book_path(author, title, series_name, series_position)
         
@@ -81,5 +75,7 @@ class ComicsDownloader:
             file_size = cbz_path.stat().st_size
             if verbose:
                 console.print(f"[green]Комикс загружен   ✓   ({file_size / 1024 / 1024:.1f} МБ)[/green]")
+            return True
         else:
             console.print("\n[red]Не удалось скачать комикс[/red]")
+            return False
