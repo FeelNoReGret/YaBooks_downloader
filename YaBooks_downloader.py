@@ -445,10 +445,45 @@ class YaBooksApp:
             console.print(f"[red]Ошибка: {last_exception}[/red]")
         return False
 
-    async def search_and_select(self, query: str) -> Tuple[Optional[str], Optional[str]]:
-        """Поиск по названию/автору и выбор результата. Возвращает
-        (content_type, uuid) выбранного ресурса или (None, None), если
-        пользователь вышел или ничего не найдено."""
+    async def _dispatch(self, content_type: str, uuid: str):
+        """Маршрутизация выбранного ресурса в конвейер загрузки — единая точка
+        для прямых ссылок и результатов поиска."""
+        try:
+            if content_type == "authors":
+                await self.process_author(uuid)
+            elif content_type == "series":
+                await self.process_series(uuid)
+            elif content_type in ("book", "audiobook", "comicbook"):
+                await self.process_single_resource(uuid, content_type)
+            else:
+                console.print(f"[red]Неподдерживаемый тип: {content_type}[/red]")
+        except SystemExitException:
+            console.print("[yellow]Выход...[/yellow]")
+
+    async def handle_input(self, value: str):
+        """Обработка одного ввода: ссылка/UUID → загрузка, иначе — поиск."""
+        content_type, uuid = self.parse_input_url(value)
+        if not uuid:
+            # Не ссылка и не UUID-подобный токен → поиск по названию/автору
+            await self.search_and_select(value)
+            return
+        if not content_type:
+            content_type = await self.determine_resource_type(uuid)
+            if not content_type:
+                # Похоже на UUID, но ресурс не найден → трактуем как запрос
+                await self.search_and_select(value)
+                return
+        type_name_ru = RESOURCE_TYPE_NAMES_RU.get(content_type, content_type)
+        console.print(f"[cyan]Определён тип: {type_name_ru}[/cyan]")
+        if self.bitrate_set:
+            name = "максимальное" if self.downloader.bitrate_mode == "max_bit_rate" else "минимальное"
+            console.print(f"[cyan]Качество аудио: {name}[/cyan]")
+        await self._dispatch(content_type, uuid)
+
+    async def search_and_select(self, query: str):
+        """Поиск по названию/автору. Показывает результаты и позволяет скачивать
+        выбранные (номера через пробел), догружать ('+') и вернуться к вводу
+        ('0'/пустой ввод). Программу не закрывает."""
         results: List[dict] = []
         page, cursor = await self.downloader.search(query)
         results.extend(page)
@@ -459,43 +494,57 @@ class YaBooksApp:
             results.extend(page)
         if not results:
             console.print("[red]Ничего не найдено[/red]")
-            return None, None
+            return
 
+        show_table = True
         while True:
-            table = Table(title=f"Результаты поиска: {query}")
-            table.add_column("№", justify="right", style="cyan")
-            table.add_column("Тип", style="magenta")
-            table.add_column("Название", style="green")
-            table.add_column("Автор", style="dim")
-            for i, r in enumerate(results, 1):
-                icon = SEARCH_TYPE_ICON.get(r["content_type"], "")
-                label = RESOURCE_TYPE_NAMES_RU.get(r["content_type"], r["content_type"])
-                author = r["authors"][0] if r["authors"] else ""
-                table.add_row(str(i), f"{icon} {label}", pad_title(r["title"]), author)
-            console.print(table)
+            if show_table:
+                table = Table(title=f"Результаты поиска: {query}")
+                table.add_column("№", justify="right", style="cyan")
+                table.add_column("Тип", style="magenta")
+                table.add_column("Название", style="green")
+                table.add_column("Автор", style="dim")
+                for i, r in enumerate(results, 1):
+                    icon = SEARCH_TYPE_ICON.get(r["content_type"], "")
+                    label = RESOURCE_TYPE_NAMES_RU.get(r["content_type"], r["content_type"])
+                    author = r["authors"][0] if r["authors"] else ""
+                    table.add_row(str(i), f"{icon} {label}", pad_title(r["title"]), author)
+                console.print(table)
 
-            console.print("\n[bold]Опции:[/bold]")
-            if cursor is not None:
-                console.print("[yellow]+[/yellow] - показать ещё")
-            console.print("[yellow]0[/yellow] - выход")
-            console.print(f"Или введите номер (1-{len(results)})")
+            more = " [yellow]+[/yellow] — ещё;" if cursor is not None else ""
+            console.print(f"\n[bold]Номера через пробел[/bold] — скачать;{more} [yellow]0[/yellow] — к вводу")
             selected = Prompt.ask("Выберите").strip()
 
-            if selected == "0":
-                return None, None
-            if selected == "+" and cursor is not None:
-                page, cursor = await self.downloader.search(query, cursor)
-                results.extend(page)
+            if selected in ("", "0"):
+                return
+            if selected == "+":
+                if cursor is not None:
+                    page, cursor = await self.downloader.search(query, cursor)
+                    results.extend(page)
+                    show_table = True
+                else:
+                    console.print("[yellow]Больше результатов нет[/yellow]")
+                    show_table = False
                 continue
-            try:
-                index = int(selected) - 1
-            except ValueError:
-                console.print("[red]Неверный выбор[/red]")
+
+            # Разбор номеров через пробел; неверные токены пропускаем.
+            indices, bad = [], []
+            for tok in selected.split():
+                if tok.isdigit() and 1 <= int(tok) <= len(results):
+                    indices.append(int(tok) - 1)
+                else:
+                    bad.append(tok)
+            if bad:
+                console.print(f"[red]Пропущено (неверный номер): {' '.join(bad)}[/red]")
+            if not indices:
+                show_table = False
                 continue
-            if 0 <= index < len(results):
-                chosen = results[index]
-                return chosen["content_type"], chosen["uuid"]
-            console.print("[red]Неверный номер[/red]")
+            for idx in indices:
+                r = results[idx]
+                await self._dispatch(r["content_type"], r["uuid"])
+            console.print(f"[green]Готово: {len(indices)}.[/green] "
+                          f"Введите ещё номера или [yellow]0[/yellow] — к вводу.")
+            show_table = False
 
     async def run(self, url: Optional[str] = None):
         args = sys.argv[1:]
@@ -510,67 +559,41 @@ class YaBooksApp:
             elif not arg.startswith("--"):
                 url_arg = arg
 
-        if url:
-            value = url
-        elif url_arg:
-            value = url_arg
-        else:
-            console.print("[bold]Использование:[/bold] python YaBooks_downloader.py [ПАРАМЕТРЫ] [ССЫЛКА]\n")
-            console.print("[bold]Параметры:[/bold]")
-            console.print("  --max_bitrate    Загрузка аудиокниг в максимальном качестве")
-            console.print("  --min_bitrate    Загрузка аудиокниг в минимальном качестве")
-            console.print("\n[bold]Ссылка может быть на:[/bold]")
-            console.print("  книгу        https://books.yandex.ru/books/UUID")
-            if self.ffmpeg_available:
-                console.print("  аудиокнигу   https://books.yandex.ru/audiobooks/UUID")
-            else:
-                console.print("  аудиокнигу   https://books.yandex.ru/audiobooks/UUID [red]- требуется установка FFmpeg для загрузки аудиокниг![/red]")
-            console.print("  комикс       https://books.yandex.ru/comicbooks/UUID")
-            console.print("  серию        https://books.yandex.ru/series/UUID")
-            console.print("  автора       https://books.yandex.ru/authors/UUID")
-            console.print("\n[bold]Либо введите название книги или автора для поиска.[/bold]")
-            console.print("\n[bold]Примеры:[/bold]")
-            console.print("  python YaBooks_downloader.py AbCd1234")
-            console.print("  python YaBooks_downloader.py --min_bitrate https://books.yandex.ru/audiobooks/AbCd1234")
-            console.print("  python YaBooks_downloader.py (интерактивный режим)\n")
-            value = input("> ").strip()
-            if not value:
-                return
-
-        content_type, uuid = self.parse_input_url(value)
-        if not uuid:
-            # Не ссылка и не UUID-подобный токен → поиск по названию/автору
-            content_type, uuid = await self.search_and_select(value)
-        elif not content_type:
-            content_type = await self.determine_resource_type(uuid)
-            if not content_type:
-                # Похоже на UUID, но ресурс не найден → пробуем как запрос поиска
-                content_type, uuid = await self.search_and_select(value)
-        if not uuid or not content_type:
+        # Одиночный запуск с аргументом/параметром — обрабатываем один раз.
+        if url or url_arg:
+            await self.handle_input(url or url_arg)
             return
 
-        # Для одиночной аудиокниги проверка FFmpeg/битрейта повторно
-        # выполняется внутри process_single_resource (ensure_audio_ready);
-        # для series/authors тип контента станет известен только после
-        # запроса состава, поэтому там она вызывается на месте.
+        # Интерактивный режим: справка один раз, затем цикл ввода.
+        console.print("[bold]Использование:[/bold] python YaBooks_downloader.py [ПАРАМЕТРЫ] [ССЫЛКА]\n")
+        console.print("[bold]Параметры:[/bold]")
+        console.print("  --max_bitrate    Загрузка аудиокниг в максимальном качестве")
+        console.print("  --min_bitrate    Загрузка аудиокниг в минимальном качестве")
+        console.print("\n[bold]Ссылка может быть на:[/bold]")
+        console.print("  книгу        https://books.yandex.ru/books/UUID")
+        if self.ffmpeg_available:
+            console.print("  аудиокнигу   https://books.yandex.ru/audiobooks/UUID")
+        else:
+            console.print("  аудиокнигу   https://books.yandex.ru/audiobooks/UUID [red]- требуется установка FFmpeg для загрузки аудиокниг![/red]")
+        console.print("  комикс       https://books.yandex.ru/comicbooks/UUID")
+        console.print("  серию        https://books.yandex.ru/series/UUID")
+        console.print("  автора       https://books.yandex.ru/authors/UUID")
+        console.print("\n[bold]Либо введите название книги или автора для поиска.[/bold]")
+        console.print("[dim]Пустой ввод — выход.[/dim]\n")
 
-        type_name_ru = RESOURCE_TYPE_NAMES_RU.get(content_type, content_type)
-        console.print(f"[cyan]Определён тип: {type_name_ru}[/cyan]")
-        if self.bitrate_set:
-            name = "максимальное" if self.downloader.bitrate_mode == "max_bit_rate" else "минимальное"
-            console.print(f"[cyan]Качество аудио: {name}[/cyan]")
-
-        try:
-            if content_type == "authors":
-                await self.process_author(uuid)
-            elif content_type == "series":
-                await self.process_series(uuid)
-            elif content_type in ("book", "audiobook", "comicbook"):
-                await self.process_single_resource(uuid, content_type)
-            else:
-                console.print(f"[red]Неподдерживаемый тип: {content_type}[/red]")
-        except SystemExitException:
-            console.print("[yellow]Выход...[/yellow]")
+        while True:
+            try:
+                value = input("> ").strip()
+            except EOFError:
+                return
+            if not value:
+                return
+            # Ошибка при обработке одного ввода (сеть, истёкший токен и т.п.)
+            # не должна закрывать сессию — сообщаем и возвращаемся к вводу.
+            try:
+                await self.handle_input(value)
+            except Exception as e:
+                console.print(f"[red]Ошибка: {e}[/red]")
 
 async def main():
     app = YaBooksApp()
