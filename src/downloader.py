@@ -8,10 +8,22 @@ import httpx
 from tenacity import retry, stop_after_attempt, wait_exponential
 from rich.console import Console
 
-from src.config import HEADERS, URLS, MYBOOKS_DIR, MAX_CONCURRENT_DOWNLOADS
+from src.config import HEADERS, URLS, MYBOOKS_DIR, MAX_CONCURRENT_DOWNLOADS, GRAPHQL_URL, SEARCH_QUERY
 from src.utils import sanitize_filename, format_series_position
 
 console = Console()
+
+# Соответствие типов результатов поиска (GraphQL __typename) внутренним типам
+# контента приложения. Типы, которых здесь нет (полки, издатели, темы,
+# пользователи, TextSerial), приложение скачивать не умеет — они
+# отфильтровываются в единственном месте, в search().
+SEARCH_TYPENAME_TO_TYPE = {
+    "TextBook": "book",
+    "AudioBook": "audiobook",
+    "ComicBook": "comicbook",
+    "Series": "series",
+    "Person": "authors",
+}
 
 
 class YandexBooksDownloader:
@@ -59,6 +71,40 @@ class YandexBooksDownloader:
             raise Exception("Слишком много запросов")
         response.raise_for_status()
         return response.json()
+
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+    async def search(self, query: str, cursor: str = "") -> Tuple[List[dict], Optional[str]]:
+        """Поиск по каталогу (GraphQL). Возвращает (нормализованные результаты,
+        курсор следующей страницы или None). Результаты приведены к единому
+        виду {content_type, uuid, title, authors} и отфильтрованы по
+        поддерживаемым типам."""
+        body = {
+            "operationName": "Search",
+            "variables": {"query": {"cursor": cursor, "noMisspell": False,
+                                     "query": query, "types": []}},
+            "query": SEARCH_QUERY,
+        }
+        response = await self.client.post(GRAPHQL_URL, json=body)
+        response.raise_for_status()
+        search = (response.json().get("data") or {}).get("search") or {}
+        results = [r for node in (search.get("page") or [])
+                   if (r := self._normalize_search_node(node))]
+        # None — единый признак «следующей страницы нет» (пустой курсор тоже).
+        return results, search.get("cursor") or None
+
+    def _normalize_search_node(self, node: dict) -> Optional[dict]:
+        content_type = SEARCH_TYPENAME_TO_TYPE.get(node.get("__typename"))
+        if not content_type:
+            return None
+        # У книг/аудио/комиксов поля вложены в node["book"]; у серий и авторов
+        # (Person) — прямо в node.
+        data = node.get("book") or node
+        return {
+            "content_type": content_type,
+            "uuid": data.get("uuid", ""),
+            "title": data.get("name", ""),
+            "authors": [a.get("name", "") for a in data.get("authors", []) if a.get("name")],
+        }
 
     async def download_file(self, url: str, filepath: Path):
         """Скачать файл на диск"""

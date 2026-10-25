@@ -31,6 +31,7 @@ CONTENT_TYPE_LABELS = {"book": "Книга", "audiobook": "Аудиокнига"
 CONTENT_TYPE_PLURAL = {"book": "книг", "audiobook": "аудиокниг", "comicbook": "комиксов"}
 DOWNLOAD_TYPE_NAMES = {"audiobook": "аудиокниги", "book": "книги", "comicbook": "комикса"}
 RESOURCE_TYPE_NAMES_RU = {"book": "книга", "audiobook": "аудиокнига", "comicbook": "комикс", "series": "серия", "authors": "автор"}
+SEARCH_TYPE_ICON = {"book": "📚", "audiobook": "🎧", "comicbook": "🎨", "series": "📀", "authors": "👤"}
 
 
 def pad_title(title: str) -> str:
@@ -444,6 +445,58 @@ class YaBooksApp:
             console.print(f"[red]Ошибка: {last_exception}[/red]")
         return False
 
+    async def search_and_select(self, query: str) -> Tuple[Optional[str], Optional[str]]:
+        """Поиск по названию/автору и выбор результата. Возвращает
+        (content_type, uuid) выбранного ресурса или (None, None), если
+        пользователь вышел или ничего не найдено."""
+        results: List[dict] = []
+        page, cursor = await self.downloader.search(query)
+        results.extend(page)
+        # Если на странице нет поддерживаемых типов, но есть следующая —
+        # тянем дальше (бывает редко: обычный книжный запрос даёт книги сразу).
+        while not results and cursor is not None:
+            page, cursor = await self.downloader.search(query, cursor)
+            results.extend(page)
+        if not results:
+            console.print("[red]Ничего не найдено[/red]")
+            return None, None
+
+        while True:
+            table = Table(title=f"Результаты поиска: {query}")
+            table.add_column("№", justify="right", style="cyan")
+            table.add_column("Тип", style="magenta")
+            table.add_column("Название", style="green")
+            table.add_column("Автор", style="dim")
+            for i, r in enumerate(results, 1):
+                icon = SEARCH_TYPE_ICON.get(r["content_type"], "")
+                label = RESOURCE_TYPE_NAMES_RU.get(r["content_type"], r["content_type"])
+                author = r["authors"][0] if r["authors"] else ""
+                table.add_row(str(i), f"{icon} {label}", pad_title(r["title"]), author)
+            console.print(table)
+
+            console.print("\n[bold]Опции:[/bold]")
+            if cursor is not None:
+                console.print("[yellow]+[/yellow] - показать ещё")
+            console.print("[yellow]0[/yellow] - выход")
+            console.print(f"Или введите номер (1-{len(results)})")
+            selected = Prompt.ask("Выберите").strip()
+
+            if selected == "0":
+                return None, None
+            if selected == "+" and cursor is not None:
+                page, cursor = await self.downloader.search(query, cursor)
+                results.extend(page)
+                continue
+            try:
+                index = int(selected) - 1
+            except ValueError:
+                console.print("[red]Неверный выбор[/red]")
+                continue
+            if 0 <= index < len(results):
+                chosen = results[index]
+                return chosen["content_type"], chosen["uuid"]
+            console.print("[red]Неверный номер[/red]")
+
     async def run(self, url: Optional[str] = None):
         args = sys.argv[1:]
         url_arg = None
@@ -475,6 +528,7 @@ class YaBooksApp:
             console.print("  комикс       https://books.yandex.ru/comicbooks/UUID")
             console.print("  серию        https://books.yandex.ru/series/UUID")
             console.print("  автора       https://books.yandex.ru/authors/UUID")
+            console.print("\n[bold]Либо введите название книги или автора для поиска.[/bold]")
             console.print("\n[bold]Примеры:[/bold]")
             console.print("  python YaBooks_downloader.py AbCd1234")
             console.print("  python YaBooks_downloader.py --min_bitrate https://books.yandex.ru/audiobooks/AbCd1234")
@@ -485,13 +539,15 @@ class YaBooksApp:
 
         content_type, uuid = self.parse_input_url(value)
         if not uuid:
-            console.print("[red]Не удалось распознать ссылку или UUID[/red]")
-            return
-        if not content_type:
+            # Не ссылка и не UUID-подобный токен → поиск по названию/автору
+            content_type, uuid = await self.search_and_select(value)
+        elif not content_type:
             content_type = await self.determine_resource_type(uuid)
             if not content_type:
-                console.print("[red]Не удалось определить тип ресурса[/red]")
-                return
+                # Похоже на UUID, но ресурс не найден → пробуем как запрос поиска
+                content_type, uuid = await self.search_and_select(value)
+        if not uuid or not content_type:
+            return
 
         # Для одиночной аудиокниги проверка FFmpeg/битрейта повторно
         # выполняется внутри process_single_resource (ensure_audio_ready);
