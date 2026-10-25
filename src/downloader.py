@@ -49,30 +49,33 @@ class YandexBooksDownloader:
         if self.client:
             await self.client.aclose()
 
+    async def _reauth(self) -> bool:
+        """Сбросить истёкший токен и получить новый. get_auth_token() синхронная
+        и может открыть блокирующее окно авторизации (pywebview) — выполняем её
+        в отдельном потоке, чтобы не заморозить event loop (важно при
+        параллельных загрузках, например глав аудиокниги). Возвращает True, если
+        токен обновлён. Общая для api_get и search."""
+        console.print("\n[yellow]Токен истёк, требуется повторная авторизация[/yellow]")
+        from src.auth import get_auth_token, clear_token
+        clear_token()
+        new_token = await asyncio.to_thread(get_auth_token)
+        if new_token:
+            HEADERS["auth-token"] = new_token
+            self.client.headers["auth-token"] = new_token
+            return True
+        return False
+
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
     async def api_get(self, url: str) -> dict:
         response = await self.client.get(url)
-        if response.status_code == 401:
-            console.print("\n[yellow]Токен истёк, требуется повторная авторизация[/yellow]")
-            from src.auth import get_auth_token
-            token_file = Path("token.txt")
-            if token_file.exists():
-                token_file.unlink()
-            # get_auth_token() синхронная и может открыть блокирующее окно
-            # авторизации (pywebview) — выполняем её в отдельном потоке,
-            # чтобы не заморозить event loop (особенно важно при
-            # параллельных загрузках, например глав аудиокниги).
-            new_token = await asyncio.to_thread(get_auth_token)
-            if new_token:
-                HEADERS["auth-token"] = new_token
-                self.client.headers["auth-token"] = new_token
-                response = await self.client.get(url)
+        if response.status_code == 401 and await self._reauth():
+            response = await self.client.get(url)
         if response.status_code == 429:
             raise Exception("Слишком много запросов")
         response.raise_for_status()
         return response.json()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5))
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5), reraise=True)
     async def search(self, query: str, cursor: str = "") -> Tuple[List[dict], Optional[str]]:
         """Поиск по каталогу (GraphQL). Возвращает (нормализованные результаты,
         курсор следующей страницы или None). Результаты приведены к единому
@@ -85,8 +88,15 @@ class YandexBooksDownloader:
             "query": SEARCH_QUERY,
         }
         response = await self.client.post(GRAPHQL_URL, json=body)
+        if response.status_code == 401 and await self._reauth():
+            response = await self.client.post(GRAPHQL_URL, json=body)
         response.raise_for_status()
-        search = (response.json().get("data") or {}).get("search") or {}
+        payload = response.json()
+        search = (payload.get("data") or {}).get("search") or {}
+        # Ошибки GraphQL приходят с HTTP 200 (data=null) — не маскируем их под
+        # «ничего не найдено», а поднимаем с текстом (его покажет цикл ввода).
+        if not search and payload.get("errors"):
+            raise Exception(payload["errors"][0].get("message", "Ошибка поиска"))
         results = [r for node in (search.get("page") or [])
                    if (r := self._normalize_search_node(node))]
         # None — единый признак «следующей страницы нет» (пустой курсор тоже).
