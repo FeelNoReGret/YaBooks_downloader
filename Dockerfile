@@ -22,4 +22,6 @@ EXPOSE 8000
 
 # 1 воркер — чтобы держать потребление RAM в рамках (цель ~200–300 МБ).
 # WEB_SECRET_KEY задайте через окружение (иначе сессии сбрасываются при рестарте).
-CMD ["sh", "-c", "uvicorn web.app:app --host 0.0.0.0 --port ${PORT} --workers 1"]
+# HTTPS: если заданы WEB_SSL_CERT и WEB_SSL_KEY (пути к сертификату и ключу),
+# uvicorn поднимается по TLS; иначе — обычный HTTP.
+CMD ["sh", "-c", "uvicorn web.app:app --host 0.0.0.0 --port ${PORT} --workers 1 ${WEB_SSL_CERT:+--ssl-certfile $WEB_SSL_CERT --ssl-keyfile $WEB_SSL_KEY}"]

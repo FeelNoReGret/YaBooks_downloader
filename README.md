@@ -87,8 +87,40 @@ docker run -d -p 8000:8000 -e WEB_SECRET_KEY="секрет" -e WEB_COOKIE_SECURE
 - `WEB_COOKIE_SECURE` — `1` по умолчанию (cookie только по HTTPS). Для доступа по обычному `http` поставьте `0`.
 - `WEB_MAX_DOWNLOADS` — сколько файлов собирать одновременно (по умолчанию 2).
 - `PORT` — порт внутри контейнера (по умолчанию 8000).
+- `WEB_SSL_CERT` / `WEB_SSL_KEY` — пути к сертификату и ключу внутри контейнера; если заданы, uvicorn поднимается по HTTPS (см. ниже). Если не заданы — обычный HTTP.
 
 **Важно:**
 - FFmpeg для аудиокниг уже включён в образ. Книги (EPUB) и комиксы (CBZ) работают и без него.
 - Сборка аудиокниги идёт минутами — браузер покажет спиннер, затем начнётся загрузка. За обратным прокси (nginx и т.п.) увеличьте таймаут (`proxy_read_timeout`) и включите HTTPS (`WEB_COOKIE_SECURE=1`).
 - Потребление RAM одним воркером — порядка 80–150 МБ (большие файлы отдаются потоком, в память не загружаются).
+
+### HTTPS
+TLS можно отдавать прямо из uvicorn — без отдельного прокси. Сертификат и ключ монтируются в контейнер, пути указываются в `WEB_SSL_CERT`/`WEB_SSL_KEY`.
+
+В `docker-compose.yml` уже настроены монтирование сертификатов, порт `443:8000` и `WEB_COOKIE_SECURE=1`. Пути к вашим сертификатам задаются в файле `.env` рядом (он в `.gitignore`):
+```
+cp .env.example .env     # и впишите пути SSL_CERT_FILE / SSL_KEY_FILE
+docker compose up -d --build
+```
+Сайт открывается по `https://ВАШ_ДОМЕН/`.
+
+Через `docker run` напрямую (подставьте свои пути вместо `/path/to/...`):
+```
+docker run -d -p 443:8000 \
+  -v /path/to/your-cert.pem:/certs/cert.pem:ro \
+  -v /path/to/your-cert.key:/certs/key.pem:ro \
+  -e WEB_SSL_CERT=/certs/cert.pem -e WEB_SSL_KEY=/certs/key.pem \
+  -e WEB_COOKIE_SECURE=1 -e WEB_SECRET_KEY="секрет" \
+  yabooks-web
+```
+
+Без Docker (прямо на сервере, порт 443 требует root):
+```
+sudo WEB_COOKIE_SECURE=1 .venv/bin/uvicorn web.app:app --host 0.0.0.0 --port 443 \
+  --ssl-certfile /path/to/your-cert.pem --ssl-keyfile /path/to/your-cert.key
+```
+
+Замечания:
+- При HTTPS обязательно `WEB_COOKIE_SECURE=1` — иначе браузер не сохранит cookie входа.
+- Файл `.pem` должен содержать **полную цепочку** (сертификат сайта + промежуточные), иначе часть браузеров выдаст предупреждение. Самоподписанный сертификат браузер пометит как недоверенный.
+- Редирект `http→https` uvicorn сам не делает. Если нужен (или нужен HTTP/2, отдача статики прокси) — поставьте впереди nginx/Caddy, терминируйте TLS на нём, а приложение держите на HTTP (тогда уберите `WEB_SSL_*` и монтирование сертификатов, но оставьте `WEB_COOKIE_SECURE=1`).

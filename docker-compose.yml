@@ -2,7 +2,13 @@ services:
   yabooks:
     build: .
     ports:
-      - "8000:8000"
+      # Хост :443 (HTTPS) → контейнер :8000. Для простого HTTP замените на "8000:8000".
+      - "443:8000"
+    volumes:
+      # Сертификаты с хоста (read-only). Пути задаются в .env рядом
+      # (SSL_CERT_FILE/SSL_KEY_FILE); .env в .gitignore — в репозиторий не попадёт.
+      - ${SSL_CERT_FILE}:/certs/cert.pem:ro
+      - ${SSL_KEY_FILE}:/certs/key.pem:ro
     environment:
       # Ключ подписи cookie сессии. Задайте свой секрет (напр. в .env рядом:
       # WEB_SECRET_KEY=...). Без него сессии сбрасываются при каждом рестарте.
@@ -10,4 +16,8 @@ services:
       # По http (без TLS) нужен 0, иначе браузер не сохранит cookie.
       # За HTTPS-прокси поставьте 1.
       - WEB_COOKIE_SECURE=1
+      # HTTPS прямо в uvicorn: пути к сертификату и ключу внутри контейнера.
+      # Уберите эти две строки (и volumes выше), если TLS терминирует внешний прокси.
+      - WEB_SSL_CERT=/certs/cert.pem
+      - WEB_SSL_KEY=/certs/key.pem
     restart: unless-stopped
