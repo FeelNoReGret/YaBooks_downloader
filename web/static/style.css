@@ -9,16 +9,16 @@
   --shadow: 0 1px 3px rgba(0,0,0,.08), 0 6px 20px rgba(0,0,0,.06);
   --radius: 12px;
 }
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #161618;
-    --surface: #202023;
-    --text: #ececee;
-    --muted: #9a9aa0;
-    --border: #2e2e32;
-    --accent: #ff5146;
-    --shadow: 0 1px 3px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.35);
-  }
+/* Тёмная тема — только по явному выбору (data-theme="dark" на <html>).
+   По умолчанию (без атрибута) действует светлая тема выше. */
+:root[data-theme="dark"] {
+  --bg: #161618;
+  --surface: #202023;
+  --text: #ececee;
+  --muted: #9a9aa0;
+  --border: #2e2e32;
+  --accent: #ff5146;
+  --shadow: 0 1px 3px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.35);
 }
 
 * { box-sizing: border-box; }

@@ -4,6 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>YaBooks</title>
+  <!-- Тема применяется до первой отрисовки, чтобы не было мигания.
+       По умолчанию светлая; тёмная — только если пользователь её выбрал. -->
+  <script>
+    try {
+      if (localStorage.getItem("theme") === "dark")
+        document.documentElement.dataset.theme = "dark";
+    } catch (e) {}
+  </script>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -15,6 +23,7 @@
         <input type="search" id="search-input" placeholder="Название книги или автор…" aria-label="Поиск">
         <button type="submit" aria-label="Искать">Найти</button>
       </form>
+      <button class="link-btn" id="theme-btn" type="button" aria-label="Сменить тему">🌙</button>
       <button class="link-btn" id="logout-btn" type="button">Выйти</button>
     </div>
   </header>

@@ -377,13 +377,15 @@ class YandexBooksDownloader:
             
             position = part.get("position_label") or part.get("position") or 0
             series_position = format_series_position(position)
-            
+
+            cover = resource.get("cover") or {}
             books.append({
                 "uuid": resource.get("uuid", ""),
                 "title": resource.get("title", "Неизвестно"),
                 "authors": self.extract_authors(resource),
                 "resource_type": part.get("resource_type", "book"),
                 "series_position": series_position,
+                "cover_url": cover.get("large") or cover.get("medium") or cover.get("small"),
             })
         
         return books

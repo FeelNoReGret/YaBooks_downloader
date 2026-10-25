@@ -13,9 +13,11 @@ const el = {
   results: $("results"), more: $("more-btn"),
   searchForm: $("search-form"), searchInput: $("search-input"),
   loginForm: $("login-form"), tokenInput: $("token-input"), loginBtn: $("login-btn"), loginErr: $("login-err"),
-  logoutBtn: $("logout-btn"), oauthLink: $("oauth-link"),
+  logoutBtn: $("logout-btn"), oauthLink: $("oauth-link"), themeBtn: $("theme-btn"),
   overlay: $("overlay"), overlayText: $("overlay-text"), toast: $("toast"),
 };
+
+const DEFAULT_EMPTY = "Начните поиск — введите название книги или имя автора вверху.";
 
 let state = { q: "", cursor: null, accum: {} };
 let toastTimer = null;
@@ -32,6 +34,23 @@ function toast(msg) {
 
 function showOverlay(text) { el.overlayText.textContent = text; show(el.overlay, true); }
 function hideOverlay() { show(el.overlay, false); }
+
+function setEmpty(msg) {
+  el.empty.innerHTML = "";
+  const p = document.createElement("p");
+  p.textContent = msg;
+  el.empty.appendChild(p);
+}
+
+// --- Тема (светлая по умолчанию, переключение на тёмную) ----------------------
+function currentTheme() { return document.documentElement.dataset.theme === "dark" ? "dark" : "light"; }
+
+function applyTheme(theme) {
+  if (theme === "dark") document.documentElement.dataset.theme = "dark";
+  else delete document.documentElement.dataset.theme;
+  el.themeBtn.textContent = theme === "dark" ? "☀️" : "🌙";
+  try { localStorage.setItem("theme", theme); } catch (e) { /* приватный режим */ }
+}
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -86,6 +105,7 @@ async function logout() {
   await api("/api/logout", { method: "POST" });
   state = { q: "", cursor: null, accum: {} };
   el.results.innerHTML = "";
+  setEmpty(DEFAULT_EMPTY);
   show(el.empty, true);
   show(el.more, false);
   await refreshMe();
@@ -172,6 +192,7 @@ async function doSearch(q, append) {
   mergeAccum(data.sections || {});
   state.cursor = data.cursor || null;
   const any = renderSections(el.results, state.accum);
+  if (!any) setEmpty(`По запросу «${state.q}» ничего не найдено`);
   show(el.empty, !any);
   show(el.more, !!state.cursor);
 }
@@ -235,6 +256,8 @@ async function download(item) {
 
 // --- События ------------------------------------------------------------------
 el.oauthLink.href = OAUTH_URL;
+el.themeBtn.textContent = currentTheme() === "dark" ? "☀️" : "🌙";  // иконка по текущей теме
+el.themeBtn.addEventListener("click", () => applyTheme(currentTheme() === "dark" ? "light" : "dark"));
 el.loginForm.addEventListener("submit", (e) => { e.preventDefault(); login(el.tokenInput.value); });
 el.logoutBtn.addEventListener("click", logout);
 el.searchForm.addEventListener("submit", (e) => {

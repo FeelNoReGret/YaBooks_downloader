@@ -248,7 +248,7 @@ async def api_items(request: Request, type: str, uuid: str):
                     "uuid": b["uuid"],
                     "title": b["title"],
                     "authors": b["authors"],
-                    "cover_url": None,
+                    "cover_url": b.get("cover_url"),
                     "series_position": b.get("series_position"),
                 } for b in books]
             elif type == "authors":
