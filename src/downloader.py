@@ -5,11 +5,11 @@ from typing import Optional, List, Dict, Any, Tuple
 
 import aiofiles
 import httpx
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_not_exception_type
 from rich.console import Console
 
 from src.config import HEADERS, URLS, MYBOOKS_DIR, MAX_CONCURRENT_DOWNLOADS, GRAPHQL_URL, SEARCH_QUERY
-from src.utils import sanitize_filename, format_series_position
+from src.utils import sanitize_filename, format_series_position, AuthError
 
 console = Console()
 
@@ -33,11 +33,20 @@ class YandexBooksDownloader:
         self.client: Optional[httpx.AsyncClient] = None
         self.download_semaphore = asyncio.Semaphore(MAX_CONCURRENT_DOWNLOADS)
         self.bitrate_mode = "max_bit_rate"
+        # Папка для сохранения файлов. В CLI — общий MYBOOKS_DIR; веб-слой
+        # переопределяет на временную папку запроса (файлы не оседают на сервере).
+        self.base_dir = MYBOOKS_DIR
+        # Интерактивная переавторизация при 401 (desktop webview). В вебе
+        # выключается — там 401 должен всплыть наверх и привести к ре-логину.
+        self.allow_interactive_reauth = True
 
     async def initialize(self, token: str):
-        HEADERS["auth-token"] = token
+        # Токен кладём в заголовки конкретного клиента, а не в общий HEADERS,
+        # чтобы несколько загрузчиков с разными токенами (веб, мультиюзер) не
+        # затирали токен друг друга. httpx копирует заголовки в свой объект.
+        headers = {**HEADERS, "auth-token": token}
         self.client = httpx.AsyncClient(
-            headers=HEADERS,
+            headers=headers,
             timeout=httpx.Timeout(120.0),
             follow_redirects=True,
             http2=True,
@@ -55,12 +64,15 @@ class YandexBooksDownloader:
         в отдельном потоке, чтобы не заморозить event loop (важно при
         параллельных загрузках, например глав аудиокниги). Возвращает True, если
         токен обновлён. Общая для api_get и search."""
+        # В веб-режиме интерактивная авторизация недоступна (нет webview, токен
+        # у каждого пользователя свой) — не пытаемся, пусть 401 всплывёт наверх.
+        if not self.allow_interactive_reauth:
+            return False
         console.print("\n[yellow]Токен истёк, требуется повторная авторизация[/yellow]")
         from src.auth import get_auth_token, clear_token
         clear_token()
         new_token = await asyncio.to_thread(get_auth_token)
         if new_token:
-            HEADERS["auth-token"] = new_token
             self.client.headers["auth-token"] = new_token
             return True
         return False
@@ -75,7 +87,8 @@ class YandexBooksDownloader:
         response.raise_for_status()
         return response.json()
 
-    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5), reraise=True)
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(multiplier=1, min=1, max=5),
+           retry=retry_if_not_exception_type(AuthError), reraise=True)
     async def search(self, query: str, cursor: str = "") -> Tuple[List[dict], Optional[str]]:
         """Поиск по каталогу (GraphQL). Возвращает (нормализованные результаты,
         курсор следующей страницы или None). Результаты приведены к единому
@@ -95,8 +108,15 @@ class YandexBooksDownloader:
         search = (payload.get("data") or {}).get("search") or {}
         # Ошибки GraphQL приходят с HTTP 200 (data=null) — не маскируем их под
         # «ничего не найдено», а поднимаем с текстом (его покажет цикл ввода).
+        # Истёкший/битый токен шлюз отдаёт как extensions.type=TOKEN_EXPIRED —
+        # поднимаем отдельным AuthError (в вебе → ре-логин).
         if not search and payload.get("errors"):
-            raise Exception(payload["errors"][0].get("message", "Ошибка поиска"))
+            err = payload["errors"][0]
+            message = err.get("message", "Ошибка поиска")
+            etype = (err.get("extensions") or {}).get("type", "")
+            if etype == "TOKEN_EXPIRED" or "token expired" in message.lower():
+                raise AuthError(message)
+            raise Exception(message)
         results = [r for node in (search.get("page") or [])
                    if (r := self._normalize_search_node(node))]
         # None — единый признак «следующей страницы нет» (пустой курсор тоже).
@@ -109,11 +129,15 @@ class YandexBooksDownloader:
         # У книг/аудио/комиксов поля вложены в node["book"]; у серий и авторов
         # (Person) — прямо в node.
         data = node.get("book") or node
+        # Обложка: у книг/серий — cover, у авторов (Person) — avatar. URL прямой
+        # (api.bookmate.ru), грузится браузером без токена. CLI поле игнорирует.
+        cover = data.get("cover") or data.get("avatar") or {}
         return {
             "content_type": content_type,
             "uuid": data.get("uuid", ""),
             "title": data.get("name", ""),
             "authors": [a.get("name", "") for a in data.get("authors", []) if a.get("name")],
+            "cover_url": cover.get("url") if isinstance(cover, dict) else None,
         }
 
     async def download_file(self, url: str, filepath: Path):
@@ -168,10 +192,10 @@ class YandexBooksDownloader:
 
         if series_name:
             series_name = sanitize_filename(series_name)
-            base = MYBOOKS_DIR / author_name / series_name
+            base = self.base_dir / author_name / series_name
             filename = f"{series_position} - {title}" if series_position else title
         else:
-            base = MYBOOKS_DIR / author_name
+            base = self.base_dir / author_name
             filename = title
 
         return base / filename

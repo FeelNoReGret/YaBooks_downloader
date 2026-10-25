@@ -1,0 +1,18 @@
+# Секреты и личные данные — НИКОГДА не в образ
+.env
+token.txt
+MyBooks/
+
+# Окружение и мусор
+.venv/
+__pycache__/
+*.pyc
+.git/
+.gitignore
+.DS_Store
+
+# Не нужно вебу
+requirements.txt
+docker-compose.yml
+Dockerfile
+*.md

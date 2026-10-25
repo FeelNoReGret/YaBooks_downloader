@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>YaBooks</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <!-- Шапка с поиском -->
+  <header class="topbar" id="topbar" hidden>
+    <div class="topbar-inner">
+      <div class="brand">YaBooks</div>
+      <form class="search" id="search-form" autocomplete="off">
+        <input type="search" id="search-input" placeholder="Название книги или автор…" aria-label="Поиск">
+        <button type="submit" aria-label="Искать">Найти</button>
+      </form>
+      <button class="link-btn" id="logout-btn" type="button">Выйти</button>
+    </div>
+  </header>
+
+  <!-- Экран входа (виден по умолчанию; JS прячет его при успешном входе,
+       чтобы сбой/кэш/гонка никогда не давали пустую страницу) -->
+  <section class="gate" id="gate">
+    <div class="gate-card">
+      <h1>YaBooks</h1>
+      <p class="muted">Войдите своим токеном Яндекс.Книги. Токен хранится только
+         в вашей сессии в этом браузере.</p>
+      <form id="login-form" autocomplete="off">
+        <input type="password" id="token-input" placeholder="Вставьте токен или ссылку после входа">
+        <button type="submit" id="login-btn">Войти</button>
+      </form>
+      <p class="err" id="login-err" hidden></p>
+      <details class="help">
+        <summary>Как получить токен?</summary>
+        <ol>
+          <li>Нажмите <a id="oauth-link" href="#" target="_blank" rel="noopener">войти в Яндекс</a>.</li>
+          <li>После входа в адресной строке появится ссылка с <code>access_token=…</code>.</li>
+          <li>Скопируйте эту ссылку целиком (или сам токен) и вставьте в поле выше.</li>
+        </ol>
+      </details>
+    </div>
+  </section>
+
+  <!-- Результаты -->
+  <main id="app" hidden>
+    <div class="empty" id="empty">
+      <p>Начните поиск — введите название книги или имя автора вверху.</p>
+    </div>
+    <div id="results"></div>
+    <div class="more-wrap">
+      <button class="more-btn" id="more-btn" type="button" hidden>Показать ещё</button>
+    </div>
+  </main>
+
+  <!-- Оверлей сборки файла -->
+  <div class="overlay" id="overlay" hidden>
+    <div class="overlay-card">
+      <div class="spinner"></div>
+      <p id="overlay-text">Готовим файл…</p>
+      <p class="muted small">Аудиокниги собираются дольше — подождите, загрузка начнётся автоматически.</p>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

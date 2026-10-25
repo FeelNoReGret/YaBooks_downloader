@@ -1,0 +1,166 @@
+:root {
+  --bg: #f6f6f4;
+  --surface: #ffffff;
+  --text: #1c1c1e;
+  --muted: #6b6b70;
+  --border: #e4e4e2;
+  --accent: #e03a2f;
+  --accent-text: #ffffff;
+  --shadow: 0 1px 3px rgba(0,0,0,.08), 0 6px 20px rgba(0,0,0,.06);
+  --radius: 12px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161618;
+    --surface: #202023;
+    --text: #ececee;
+    --muted: #9a9aa0;
+    --border: #2e2e32;
+    --accent: #ff5146;
+    --shadow: 0 1px 3px rgba(0,0,0,.4), 0 6px 20px rgba(0,0,0,.35);
+  }
+}
+
+* { box-sizing: border-box; }
+/* Атрибут hidden должен перекрывать display из классов (.overlay/.gate и т.п.),
+   иначе скрытые по умолчанию элементы остаются видимыми. */
+[hidden] { display: none !important; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+.muted { color: var(--muted); }
+.small { font-size: .85rem; }
+
+/* --- Шапка --- */
+.topbar {
+  position: sticky; top: 0; z-index: 20;
+  background: color-mix(in srgb, var(--surface) 88%, transparent);
+  backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.topbar-inner {
+  max-width: 1200px; margin: 0 auto; padding: 12px 20px;
+  display: flex; align-items: center; gap: 16px;
+}
+.brand { font-weight: 700; font-size: 1.15rem; letter-spacing: -.02em; }
+.search { flex: 1; display: flex; gap: 8px; }
+.search input {
+  flex: 1; min-width: 0; padding: 10px 14px; font-size: 1rem;
+  border: 1px solid var(--border); border-radius: 999px;
+  background: var(--bg); color: var(--text);
+}
+.search input:focus { outline: 2px solid var(--accent); outline-offset: 0; }
+.search button {
+  padding: 10px 18px; border: none; border-radius: 999px;
+  background: var(--accent); color: var(--accent-text); font-weight: 600; cursor: pointer;
+}
+.link-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: .95rem; }
+.link-btn:hover { color: var(--text); }
+
+/* --- Вход --- */
+.gate { min-height: 100dvh; display: grid; place-items: center; padding: 20px; }
+.gate-card {
+  width: 100%; max-width: 420px; background: var(--surface);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 32px 28px; box-shadow: var(--shadow);
+}
+.gate-card h1 { margin: 0 0 8px; font-size: 1.6rem; letter-spacing: -.02em; }
+.gate-card form { display: flex; flex-direction: column; gap: 10px; margin-top: 18px; }
+.gate-card input {
+  padding: 12px 14px; font-size: 1rem; border: 1px solid var(--border);
+  border-radius: 10px; background: var(--bg); color: var(--text);
+}
+.gate-card input:focus { outline: 2px solid var(--accent); }
+.gate-card button {
+  padding: 12px; border: none; border-radius: 10px; background: var(--accent);
+  color: var(--accent-text); font-weight: 600; font-size: 1rem; cursor: pointer;
+}
+.gate-card button:disabled { opacity: .6; cursor: default; }
+.err { color: var(--accent); font-size: .9rem; margin: 10px 0 0; }
+.help { margin-top: 18px; font-size: .9rem; color: var(--muted); }
+.help summary { cursor: pointer; }
+.help ol { margin: 10px 0 0; padding-left: 20px; line-height: 1.6; }
+.help a { color: var(--accent); }
+code { background: var(--bg); padding: 1px 5px; border-radius: 5px; font-size: .85em; }
+
+/* --- Результаты --- */
+#app { max-width: 1200px; margin: 0 auto; padding: 24px 20px 80px; }
+.empty { text-align: center; color: var(--muted); padding: 80px 20px; }
+.section { margin-bottom: 36px; }
+.section h2 { font-size: 1.1rem; margin: 0 0 14px; letter-spacing: -.01em; }
+.grid {
+  display: grid; gap: 18px;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+}
+.card {
+  background: none; border: none; padding: 0; text-align: left; cursor: pointer;
+  color: inherit; font: inherit; display: flex; flex-direction: column; gap: 8px;
+}
+.cover {
+  position: relative; aspect-ratio: 2 / 3; border-radius: 10px; overflow: hidden;
+  background: var(--border); box-shadow: var(--shadow);
+  transition: transform .15s ease, box-shadow .15s ease;
+}
+.card:hover .cover { transform: translateY(-3px) scale(1.015); }
+.cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.cover .ph {
+  width: 100%; height: 100%; display: grid; place-items: center;
+  font-size: 2rem; color: var(--muted);
+}
+.cover .badge {
+  position: absolute; top: 8px; left: 8px; font-size: .7rem; padding: 3px 7px;
+  border-radius: 999px; background: rgba(0,0,0,.6); color: #fff; backdrop-filter: blur(4px);
+}
+.card .title {
+  font-size: .9rem; font-weight: 600; line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.card .author { font-size: .8rem; color: var(--muted); }
+
+.more-wrap { text-align: center; }
+.more-btn {
+  padding: 10px 24px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface); color: var(--text); cursor: pointer; font-size: .95rem;
+}
+.more-btn:hover { border-color: var(--accent); color: var(--accent); }
+
+.backbar { margin-bottom: 18px; }
+.back-btn {
+  background: none; border: none; color: var(--muted); cursor: pointer; font-size: .95rem; padding: 0;
+}
+.back-btn:hover { color: var(--text); }
+
+/* --- Оверлей --- */
+.overlay {
+  position: fixed; inset: 0; z-index: 50; display: grid; place-items: center;
+  background: rgba(0,0,0,.45); backdrop-filter: blur(3px);
+}
+.overlay-card {
+  background: var(--surface); border-radius: var(--radius); padding: 28px 32px;
+  text-align: center; max-width: 320px; box-shadow: var(--shadow);
+}
+.overlay-card p { margin: 12px 0 0; }
+.spinner {
+  width: 36px; height: 36px; margin: 0 auto; border-radius: 50%;
+  border: 3px solid var(--border); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* --- Тост --- */
+.toast {
+  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%);
+  background: var(--text); color: var(--bg); padding: 12px 20px; border-radius: 999px;
+  box-shadow: var(--shadow); z-index: 60; font-size: .92rem; max-width: 90vw;
+}
+
+@media (max-width: 560px) {
+  .topbar-inner { flex-wrap: wrap; }
+  .brand { order: 1; } .link-btn { order: 2; margin-left: auto; }
+  .search { order: 3; flex-basis: 100%; }
+  .grid { grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 14px; }
+}

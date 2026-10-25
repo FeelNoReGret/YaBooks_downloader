@@ -7,6 +7,15 @@ class SystemExitException(Exception):
     pass
 
 
+class AuthError(Exception):
+    """Токен недействителен/истёк (GraphQL-ошибка TOKEN_EXPIRED или REST 401).
+
+    Подкласс Exception — в CLI обрабатывается как обычная ошибка (печатается
+    текст), в вебе отличается от прочих и приводит к ре-логину.
+    """
+    pass
+
+
 def sanitize_filename(name: str) -> str:
     """Очистка имени файла от недопустимых символов с безопасной заменой"""
     if not name:
